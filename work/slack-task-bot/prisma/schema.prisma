@@ -1,0 +1,128 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RequestType {
+  CHECKOUT_LINK
+  SPLITIT_WHITELIST
+  REFUND_PAYMENT
+  BUG_REPORT
+  ENHANCEMENT_REQUEST
+  KYC_KYB
+  PAYMENT_ISSUE
+  ACCOUNT_SETTINGS
+  OTHER
+}
+
+enum RequestStatus {
+  SUBMITTED
+  IN_PROGRESS
+  DONE
+  CUSTOM
+}
+
+enum RequestUpdateKind {
+  CREATED
+  STATUS_CHANGED
+  DUE_DATE_CHANGED
+  BLOCKER_CHANGED
+  NOTE_ADDED
+  REASSIGNED
+  REQUESTER_NOTIFIED
+}
+
+model User {
+  id          String   @id @default(cuid())
+  slackUserId String   @unique
+  name        String?
+  isAdmin     Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  assignedRequests Request[]      @relation("RequestOwner")
+  requestedRequests Request[]     @relation("RequestRequester")
+  internalNotes    InternalNote[]
+  requestUpdates   RequestUpdate[]
+  channelMappings  ChannelOwnerMapping[]
+}
+
+model Channel {
+  id             String   @id @default(cuid())
+  slackChannelId String   @unique
+  name           String?
+  companyName    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  requests Request[]
+  ownerMapping ChannelOwnerMapping?
+}
+
+model ChannelOwnerMapping {
+  id             String   @id @default(cuid())
+  slackChannelId String   @unique
+  ownerSlackUserId String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  channel Channel @relation(fields: [slackChannelId], references: [slackChannelId], onDelete: Cascade)
+  owner   User    @relation(fields: [ownerSlackUserId], references: [slackUserId], onDelete: Cascade)
+}
+
+model Request {
+  id                    Int           @id @default(autoincrement())
+  title                 String
+  description           String
+  type                  RequestType   @default(OTHER)
+  status                RequestStatus @default(SUBMITTED)
+  customStatus          String?
+  requesterSlackUserId  String
+  ownerSlackUserId      String
+  channelId             String
+  threadTs              String
+  messageTs             String
+  dueDate               DateTime?
+  blocker               String?
+  lastReminderSentAt    DateTime?
+  completedAt           DateTime?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  requester User    @relation("RequestRequester", fields: [requesterSlackUserId], references: [slackUserId])
+  owner     User    @relation("RequestOwner", fields: [ownerSlackUserId], references: [slackUserId])
+  channel   Channel @relation(fields: [channelId], references: [slackChannelId])
+  notes     InternalNote[]
+  updates   RequestUpdate[]
+
+  @@index([ownerSlackUserId, status])
+  @@index([channelId])
+  @@index([dueDate])
+}
+
+model InternalNote {
+  id        String   @id @default(cuid())
+  requestId Int
+  authorSlackUserId String
+  body      String
+  createdAt DateTime @default(now())
+
+  request Request @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  author  User    @relation(fields: [authorSlackUserId], references: [slackUserId])
+}
+
+model RequestUpdate {
+  id        String            @id @default(cuid())
+  requestId Int
+  actorSlackUserId String?
+  kind      RequestUpdateKind
+  message   String
+  createdAt DateTime          @default(now())
+
+  request Request @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  actor   User?   @relation(fields: [actorSlackUserId], references: [slackUserId])
+}
