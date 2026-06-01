@@ -58,7 +58,7 @@ export function requestDetailBlocks(request: RequestWithRelations) {
         `*Original message:*\n${escapeMrkdwn(request.description)}\n\n` +
         `*Requester:* <@${request.requesterSlackUserId}>\n` +
         `*Slack channel:* <#${request.channelId}>\n` +
-        `*Thread:* <${threadLink(request.channelId, request.threadTs)}|Open thread>\n` +
+        `*Thread:* ${threadText(request)}\n` +
         `*Type:* ${typeLabel(request.type)}\n` +
         `*Status:* ${statusLabel(request)}\n` +
         `*Owner CSM:* <@${request.ownerSlackUserId}>\n` +
@@ -98,18 +98,6 @@ export function requestDetailModal(request: RequestWithRelations) {
     title: { type: "plain_text", text: request.title.slice(0, 24) || `Request ${request.id}` },
     close: { type: "plain_text", text: "Close" },
     blocks: requestDetailBlocks(request)
-  };
-}
-
-export function requestLoadingModal(requestId: number) {
-  return {
-    type: "modal",
-    callback_id: `request_loading:${requestId}`,
-    title: { type: "plain_text", text: "Loading request" },
-    close: { type: "plain_text", text: "Close" },
-    blocks: [
-      section(`Loading request ${requestId}...`)
-    ]
   };
 }
 
@@ -253,6 +241,11 @@ function button(text: string, actionId: string, value: string, style?: "primary"
 
 function divider() {
   return { type: "divider" };
+}
+
+function threadText(request: Request) {
+  if (request.threadTs.startsWith("manual-")) return "Created from /request";
+  return `<${threadLink(request.channelId, request.threadTs)}|Open thread>`;
 }
 
 function requestTypeOption(type: RequestType) {

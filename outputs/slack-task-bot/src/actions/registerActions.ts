@@ -3,7 +3,7 @@ import { RequestStatus, RequestType } from "@prisma/client";
 import { parseDueDate } from "../lib/dates";
 import { logger } from "../lib/logger";
 import { canManageRequest } from "../lib/permissions";
-import { inputModal, requestDetailModal, requestLoadingModal } from "../slack/blocks";
+import { inputModal, requestDetailModal } from "../slack/blocks";
 import {
   notifyOwnerRequestCreated,
   postRequesterNeedsInfo,
@@ -224,16 +224,14 @@ async function openRequestDetailFromAction(client: any, body: any, action: any) 
   if (!requestId) return;
 
   try {
-    const opened = await client.views.open({
-      trigger_id: body.trigger_id,
-      view: requestLoadingModal(requestId)
-    });
-
     const request = await getRequest(requestId);
-    if (!request || !opened.view?.id) return;
+    if (!request) {
+      await notifyActionFailure(client, body.user?.id, `I couldn't find request ${requestId}.`);
+      return;
+    }
 
-    await client.views.update({
-      view_id: opened.view.id,
+    await client.views.open({
+      trigger_id: body.trigger_id,
       view: requestDetailModal(request)
     });
   } catch (error) {
