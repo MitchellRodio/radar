@@ -13,6 +13,7 @@ const schema = z.object({
     .transform((value) => value === "true"),
   PORT: z.coerce.number().default(3000),
   ADMIN_SLACK_USER_IDS: z.string().optional().default(""),
+  DASHBOARD_ADMIN_TOKEN: z.string().optional().default(""),
   REMINDER_INTERVAL_MINUTES: z.coerce.number().default(60)
 });
 

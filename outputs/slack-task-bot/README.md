@@ -258,3 +258,21 @@ This intentionally does not include:
 - Advanced AI classification
 
 Future custom-command support can build on the same modal pattern used by `/request`: store a command definition with field configs, render those fields in a Slack modal, then map the submitted values into a normal request record.
+
+## Dashboard
+
+When `SLACK_SOCKET_MODE` is `true`, the app also serves a lightweight admin dashboard:
+
+```text
+https://your-service.onrender.com/dashboard
+```
+
+Set `DASHBOARD_ADMIN_TOKEN` for dashboard access. If it is not set, the app falls back to the first Slack user ID in `ADMIN_SLACK_USER_IDS`.
+
+The dashboard currently supports:
+
+- Syncing public/private Slack channels the bot can see
+- Viewing all known channels
+- Whitelisting CSM Slack user IDs
+- Assigning channel ownership to CSMs
+- Viewing basic open/total request counts per channel
