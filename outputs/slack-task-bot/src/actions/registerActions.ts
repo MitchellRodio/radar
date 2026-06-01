@@ -8,6 +8,7 @@ import {
   notifyOwnerRequestCreated,
   postRequesterNeedsInfo,
   postRequesterUpdate,
+  sendRequesterEphemeralStatusMessage,
   sendRequesterStatusMessage,
   updateRequesterStatusMessage
 } from "../slack/notifications";
@@ -147,8 +148,10 @@ export function registerActions(app: App) {
 
       if (result.channel && result.ts) {
         const updatedRequest = await updateRequesterMessageReference(request.id, result.channel, result.ts);
+        await sendRequesterEphemeralStatusMessage(client, updatedRequest);
         await notifyOwnerRequestCreated(client, updatedRequest);
       } else {
+        await sendRequesterEphemeralStatusMessage(client, request);
         await notifyOwnerRequestCreated(client, request);
       }
     } catch (error) {

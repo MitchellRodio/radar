@@ -4,7 +4,7 @@ import { logger } from "../lib/logger";
 import { registerActions } from "../actions/registerActions";
 import { registerCommands } from "../commands/registerCommands";
 import { createRequestFromSlackMessage, updateRequesterMessageReference } from "../services/requestService";
-import { notifyOwnerRequestCreated, sendRequesterStatusMessage } from "./notifications";
+import { notifyOwnerRequestCreated, sendRequesterEphemeralStatusMessage, sendRequesterStatusMessage } from "./notifications";
 
 export function createSlackApp() {
   const app = new App({
@@ -30,6 +30,7 @@ export function createSlackApp() {
         ? await updateRequesterMessageReference(request.id, requesterMessage.channel, requesterMessage.ts)
         : request;
 
+      await sendRequesterEphemeralStatusMessage(client, updatedRequest);
       await notifyOwnerRequestCreated(client, updatedRequest);
     } catch (error) {
       logger.error(error, "Failed to create request from app mention");

@@ -36,6 +36,15 @@ export async function sendRequesterStatusMessage(client: WebClient, request: Req
   });
 }
 
+export async function sendRequesterEphemeralStatusMessage(client: WebClient, request: RequestWithChannel) {
+  return client.chat.postEphemeral({
+    channel: request.channelId,
+    user: request.requesterSlackUserId,
+    text: `Request created: ${request.title}`,
+    blocks: requesterStatusBlocks(request)
+  });
+}
+
 export async function updateRequesterStatusMessage(client: WebClient, request: RequestWithChannel) {
   if (!request.requesterMessageChannelId || !request.requesterMessageTs) return;
 
@@ -96,7 +105,8 @@ export async function notifyOwnerRequestCreated(client: WebClient, request: Requ
             type: "button",
             text: { type: "plain_text", text: "View/update" },
             action_id: "request_view",
-            value: String(request.id)
+            value: String(request.id),
+            style: "primary"
           }
         ]
       }

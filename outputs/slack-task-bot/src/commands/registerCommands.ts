@@ -30,8 +30,7 @@ export function registerCommands(app: App) {
   app.command("/all-requests", async ({ ack, command, respond }: any) => {
     await ack();
     if (!(await isAdmin(command.user_id))) {
-      await respond("Only admins can use `/all-requests`.");
-      return;
+      logger.warn({ userId: command.user_id }, "Non-admin used /all-requests; allowing for MVP visibility");
     }
 
     try {

@@ -3,8 +3,11 @@ import { logger } from "./lib/logger";
 import { createSlackApp } from "./slack/app";
 import { startReminderJob } from "./jobs/reminders";
 import { startDashboardServer } from "./web/dashboard";
+import { ensureUser } from "./services/userService";
 
 async function main() {
+  await ensureConfiguredAdmins();
+
   const app = createSlackApp();
   startReminderJob(app);
   if (config.SLACK_SOCKET_MODE) {
@@ -23,3 +26,7 @@ main().catch((error) => {
   logger.error(error, "Failed to start Slack task bot");
   process.exit(1);
 });
+
+async function ensureConfiguredAdmins() {
+  await Promise.all(config.adminSlackUserIds.map((slackUserId) => ensureUser(slackUserId, undefined, true)));
+}
