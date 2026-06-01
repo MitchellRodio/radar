@@ -101,6 +101,18 @@ export function requestDetailModal(request: RequestWithRelations) {
   };
 }
 
+export function requestLoadingModal(requestId: number) {
+  return {
+    type: "modal",
+    callback_id: `request_loading:${requestId}`,
+    title: { type: "plain_text", text: "Loading request" },
+    close: { type: "plain_text", text: "Close" },
+    blocks: [
+      section(`Loading request ${requestId}...`)
+    ]
+  };
+}
+
 export function inputModal(callbackId: string, title: string, fieldLabel: string, initialValue = "", multiline = false) {
   return {
     type: "modal",

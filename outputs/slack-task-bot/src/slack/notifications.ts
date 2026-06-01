@@ -104,7 +104,7 @@ export async function notifyOwnerRequestCreated(client: WebClient, request: Requ
           {
             type: "button",
             text: { type: "plain_text", text: "View/update" },
-            action_id: "request_view",
+            action_id: "owner_request_view",
             value: String(request.id),
             style: "primary"
           }

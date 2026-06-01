@@ -3,7 +3,7 @@ import { RequestStatus, RequestType } from "@prisma/client";
 import { parseDueDate } from "../lib/dates";
 import { logger } from "../lib/logger";
 import { canManageRequest } from "../lib/permissions";
-import { inputModal, requestDetailModal } from "../slack/blocks";
+import { inputModal, requestDetailModal, requestLoadingModal } from "../slack/blocks";
 import {
   notifyOwnerRequestCreated,
   postRequesterNeedsInfo,
@@ -28,20 +28,12 @@ import {
 export function registerActions(app: App) {
   app.action("request_view", async ({ ack, body, client, action }: any) => {
     await ack();
-    try {
-      const requestId = parseRequestId(action.value);
-      if (!requestId) return;
+    await openRequestDetailFromAction(client, body, action);
+  });
 
-      const request = await getRequest(requestId);
-      if (!request) return;
-
-      await client.views.open({
-        trigger_id: body.trigger_id,
-        view: requestDetailModal(request)
-      });
-    } catch (error) {
-      logger.error(error, "Failed to open request detail view");
-    }
+  app.action("owner_request_view", async ({ ack, body, client, action }: any) => {
+    await ack();
+    await openRequestDetailFromAction(client, body, action);
   });
 
   app.action("request_set_status", async ({ ack, body, client, action }: any) => {
@@ -225,6 +217,38 @@ export function registerActions(app: App) {
       return request;
     });
   });
+}
+
+async function openRequestDetailFromAction(client: any, body: any, action: any) {
+  const requestId = parseRequestId(action.value);
+  if (!requestId) return;
+
+  try {
+    const opened = await client.views.open({
+      trigger_id: body.trigger_id,
+      view: requestLoadingModal(requestId)
+    });
+
+    const request = await getRequest(requestId);
+    if (!request || !opened.view?.id) return;
+
+    await client.views.update({
+      view_id: opened.view.id,
+      view: requestDetailModal(request)
+    });
+  } catch (error) {
+    logger.error({ error, requestId, userId: body.user?.id }, "Failed to open request detail view");
+    await notifyActionFailure(client, body.user?.id, "I couldn't open that request. Try `/my-requests` and use View/update from there.");
+  }
+}
+
+async function notifyActionFailure(client: any, slackUserId: string | undefined, text: string) {
+  if (!slackUserId) return;
+  try {
+    await client.chat.postMessage({ channel: slackUserId, text });
+  } catch (error) {
+    logger.error(error, "Failed to notify user about request action failure");
+  }
 }
 
 async function openInput(client: any, triggerId: string, callbackId: string, title: string, label: string, initialValue: string, multiline: boolean) {
