@@ -4,8 +4,13 @@ import { parseDueDate } from "../lib/dates";
 import { logger } from "../lib/logger";
 import { canManageRequest } from "../lib/permissions";
 import { inputModal, requestDetailModal } from "../slack/blocks";
-import { typeLabel } from "../slack/format";
-import { notifyOwnerRequestCreated, postRequesterUpdate } from "../slack/notifications";
+import {
+  notifyOwnerRequestCreated,
+  postRequesterNeedsInfo,
+  postRequesterUpdate,
+  sendRequesterStatusMessage,
+  updateRequesterStatusMessage
+} from "../slack/notifications";
 import {
   addInternalNote,
   createRequestFromManualInput,
@@ -16,22 +21,26 @@ import {
   setBlocker,
   setDueDate,
   setStatus,
-  updateRequestSlackReference
+  updateRequesterMessageReference
 } from "../services/requestService";
 
 export function registerActions(app: App) {
   app.action("request_view", async ({ ack, body, client, action }: any) => {
     await ack();
-    const requestId = parseRequestId(action.value);
-    if (!requestId) return;
+    try {
+      const requestId = parseRequestId(action.value);
+      if (!requestId) return;
 
-    const request = await getRequest(requestId);
-    if (!request) return;
+      const request = await getRequest(requestId);
+      if (!request) return;
 
-    await client.views.open({
-      trigger_id: body.trigger_id,
-      view: requestDetailModal(request)
-    });
+      await client.views.open({
+        trigger_id: body.trigger_id,
+        view: requestDetailModal(request)
+      });
+    } catch (error) {
+      logger.error(error, "Failed to open request detail view");
+    }
   });
 
   app.action("request_set_status", async ({ ack, body, client, action }: any) => {
@@ -42,6 +51,7 @@ export function registerActions(app: App) {
     if (!requestId || !(await canManageRequest(actorSlackUserId, requestId))) return;
 
     const request = await setStatus(requestId, actorSlackUserId, statusPart as RequestStatus);
+    await updateRequesterStatusMessage(client, request);
     if (statusPart === "DONE") {
       await postRequesterUpdate(client, request, actorSlackUserId);
     }
@@ -84,8 +94,14 @@ export function registerActions(app: App) {
     const request = await getRequest(requestId);
     if (!request) return;
 
+    await updateRequesterStatusMessage(client, request);
     await postRequesterUpdate(client, request, actorSlackUserId);
     await updateCurrentModal(client, body, request);
+  });
+
+  app.action("request_needs_info_open", async ({ ack, body, client, action }: any) => {
+    await ack();
+    await openInput(client, body.trigger_id, `request_needs_info:${action.value}`, "Need info", "Message to requester", "", true);
   });
 
   app.action("request_close_view", async ({ ack }: any) => {
@@ -127,28 +143,10 @@ export function registerActions(app: App) {
         blocker
       });
 
-      const result = await client.chat.postMessage({
-        channel: channelId,
-        text: `Request created: #${request.id}`,
-        unfurl_links: false,
-        blocks: [
-          {
-            type: "section",
-            text: {
-              type: "mrkdwn",
-              text:
-                `Request created: *#${request.id}*\n` +
-                `*Title:* ${request.title}\n` +
-                `*Type:* ${typeLabel(request.type)}\n` +
-                `*Status:* Submitted\n` +
-                `*Owner:* <@${request.ownerSlackUserId}>`
-            }
-          }
-        ]
-      });
+      const result = await sendRequesterStatusMessage(client, request);
 
-      if (result.ts) {
-        const updatedRequest = await updateRequestSlackReference(request.id, result.ts);
+      if (result.channel && result.ts) {
+        const updatedRequest = await updateRequesterMessageReference(request.id, result.channel, result.ts);
         await notifyOwnerRequestCreated(client, updatedRequest);
       } else {
         await notifyOwnerRequestCreated(client, request);
@@ -158,25 +156,35 @@ export function registerActions(app: App) {
     }
   });
 
-  app.view(/^request_custom_status:/, async ({ ack, body, view }: any) => {
-    await handleModalSubmit(ack, body, view, async (requestId, actorSlackUserId, value) =>
-      setStatus(requestId, actorSlackUserId, "CUSTOM", value.trim())
+  app.view(/^request_custom_status:/, async ({ ack, body, view, client }: any) => {
+    await handleModalSubmit(
+      ack,
+      body,
+      view,
+      async (requestId, actorSlackUserId, value) => setStatus(requestId, actorSlackUserId, "CUSTOM", value.trim()),
+      async (request) => updateRequesterStatusMessage(client, request)
     );
   });
 
-  app.view(/^request_due_date:/, async ({ ack, body, view }: any) => {
-    await handleModalSubmit(ack, body, view, async (requestId, actorSlackUserId, value) => {
-      const dueDate = value.trim() ? parseDueDate(value) : null;
-      if (value.trim() && !dueDate) {
-        await ack({
-          response_action: "errors",
-          errors: { input: "Use yyyy-mm-dd or mm/dd/yyyy." }
-        });
-        return null;
-      }
+  app.view(/^request_due_date:/, async ({ ack, body, view, client }: any) => {
+    await handleModalSubmit(
+      ack,
+      body,
+      view,
+      async (requestId, actorSlackUserId, value) => {
+        const dueDate = value.trim() ? parseDueDate(value) : null;
+        if (value.trim() && !dueDate) {
+          await ack({
+            response_action: "errors",
+            errors: { input: "Use yyyy-mm-dd or mm/dd/yyyy." }
+          });
+          return null;
+        }
 
-      return setDueDate(requestId, actorSlackUserId, dueDate);
-    });
+        return setDueDate(requestId, actorSlackUserId, dueDate);
+      },
+      async (request) => updateRequesterStatusMessage(client, request)
+    );
   });
 
   app.view(/^request_blocker:/, async ({ ack, body, view }: any) => {
@@ -205,6 +213,15 @@ export function registerActions(app: App) {
       return reassignRequest(requestId, actorSlackUserId, ownerSlackUserId);
     });
   });
+
+  app.view(/^request_needs_info:/, async ({ ack, body, view, client }: any) => {
+    await handleModalSubmit(ack, body, view, async (requestId, actorSlackUserId, value) => {
+      const request = await setStatus(requestId, actorSlackUserId, "CUSTOM", "Waiting on customer");
+      await updateRequesterStatusMessage(client, request);
+      await postRequesterNeedsInfo(client, request, actorSlackUserId, value.trim());
+      return request;
+    });
+  });
 }
 
 async function openInput(client: any, triggerId: string, callbackId: string, title: string, label: string, initialValue: string, multiline: boolean) {
@@ -218,7 +235,8 @@ async function handleModalSubmit(
   ack: any,
   body: any,
   view: any,
-  update: (requestId: number, actorSlackUserId: string, value: string) => Promise<any | null>
+  update: (requestId: number, actorSlackUserId: string, value: string) => Promise<any | null>,
+  afterUpdate?: (request: any) => Promise<void>
 ) {
   const requestId = parseRequestId(view.callback_id.split(":")[1]);
   const actorSlackUserId = body.user.id;
@@ -232,6 +250,7 @@ async function handleModalSubmit(
   try {
     const request = await update(requestId, actorSlackUserId, value);
     if (!request) return;
+    if (afterUpdate) await afterUpdate(request);
 
     await ack({
       response_action: "update",

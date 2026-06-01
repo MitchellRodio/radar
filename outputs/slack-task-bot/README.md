@@ -5,11 +5,12 @@ Slack Bolt + TypeScript MVP for capturing customer requests from 100+ customer S
 ## What It Does
 
 - Creates a request when someone mentions the bot in a channel or thread.
-- Replies in-thread with `Request created: #123`.
+- Sends the requester a private DM with the request title and live status.
 - Assigns the request to the channel's default CSM owner.
 - Lets CSMs view and manage their assigned open requests with `/my-requests`.
 - Lets admins view all open requests with `/all-requests`.
 - Supports status updates, custom statuses, due dates, blockers, internal notes, reassignment, and requester notifications.
+- Lets CSMs push a request back to the requester when more information is needed.
 - Always notifies the requester in the original thread when a request is marked `Done`.
 - Sends daily DM reminders to the owner for due-today or overdue requests that are not done.
 

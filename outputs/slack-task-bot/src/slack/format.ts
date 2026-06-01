@@ -36,5 +36,5 @@ export function threadLink(channelId: string, threadTs: string): string {
 
 export function requestSummaryLine(request: Request & { channel?: { name: string | null; companyName: string | null } }) {
   const company = request.channel?.companyName ?? request.channel?.name ?? request.channelId;
-  return `#${request.id} | ${request.title} | ${company} | ${typeLabel(request.type)} | ${statusLabel(request)} | due ${formatDate(request.dueDate)}`;
+  return `${request.title} | ID ${request.id} | ${company} | ${typeLabel(request.type)} | ${statusLabel(request)} | due ${formatDate(request.dueDate)}`;
 }

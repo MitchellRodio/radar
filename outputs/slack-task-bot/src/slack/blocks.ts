@@ -23,7 +23,8 @@ export function requestListBlocks(requests: RequestWithRelations[], heading: str
     divider(),
     ...requests.flatMap((request) => [
       section(
-        `*#${request.id} ${escapeMrkdwn(request.title)}*\n` +
+        `*${escapeMrkdwn(request.title)}*\n` +
+          `*Request ID:* ${request.id}\n` +
           `*Company/channel:* ${escapeMrkdwn(request.channel?.companyName ?? request.channel?.name ?? request.channelId)}\n` +
           `*Type:* ${typeLabel(request.type)}  *Status:* ${statusLabel(request)}\n` +
           `*Due:* ${formatDate(request.dueDate)}  *Blocker:* ${escapeMrkdwn(request.blocker ?? "None")}\n` +
@@ -51,9 +52,10 @@ export function requestDetailBlocks(request: RequestWithRelations) {
     : "None";
 
   return [
-    section(`*Request #${request.id}: ${escapeMrkdwn(request.title)}*`),
+    section(`*${escapeMrkdwn(request.title)}*`),
     section(
-      `*Original message:*\n${escapeMrkdwn(request.description)}\n\n` +
+      `*Request ID:* ${request.id}\n` +
+        `*Original message:*\n${escapeMrkdwn(request.description)}\n\n` +
         `*Requester:* <@${request.requesterSlackUserId}>\n` +
         `*Slack channel:* <#${request.channelId}>\n` +
         `*Thread:* <${threadLink(request.channelId, request.threadTs)}|Open thread>\n` +
@@ -80,8 +82,11 @@ export function requestDetailBlocks(request: RequestWithRelations) {
     actions([
       button("Add Internal Note", "request_note_open", String(request.id)),
       button("Reassign CSM", "request_reassign_open", String(request.id)),
-      button("Notify requester", "request_notify_requester", String(request.id)),
-      button("Close", "request_close_view", String(request.id), "danger")
+      button("Request Info", "request_needs_info_open", String(request.id)),
+      button("Notify requester", "request_notify_requester", String(request.id))
+    ]),
+    actions([
+      button("Close View", "request_close_view", String(request.id), "danger")
     ])
   ];
 }
@@ -90,7 +95,7 @@ export function requestDetailModal(request: RequestWithRelations) {
   return {
     type: "modal",
     callback_id: `request_detail:${request.id}`,
-    title: { type: "plain_text", text: `Request #${request.id}` },
+    title: { type: "plain_text", text: request.title.slice(0, 24) || `Request ${request.id}` },
     close: { type: "plain_text", text: "Close" },
     blocks: requestDetailBlocks(request)
   };

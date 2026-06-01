@@ -3,9 +3,8 @@ import { config } from "../lib/config";
 import { logger } from "../lib/logger";
 import { registerActions } from "../actions/registerActions";
 import { registerCommands } from "../commands/registerCommands";
-import { createRequestFromSlackMessage } from "../services/requestService";
-import { typeLabel } from "./format";
-import { notifyOwnerRequestCreated } from "./notifications";
+import { createRequestFromSlackMessage, updateRequesterMessageReference } from "../services/requestService";
+import { notifyOwnerRequestCreated, sendRequesterStatusMessage } from "./notifications";
 
 export function createSlackApp() {
   const app = new App({
@@ -26,27 +25,12 @@ export function createSlackApp() {
         botUserId: context.botUserId
       });
 
-      await client.chat.postMessage({
-        channel: event.channel,
-        thread_ts: event.thread_ts ?? event.ts,
-        text: `Request created: #${request.id}`,
-        blocks: [
-          {
-            type: "section",
-            text: {
-              type: "mrkdwn",
-              text:
-                `Request created: *#${request.id}*\n` +
-                `*Title:* ${request.title}\n` +
-                `*Type:* ${typeLabel(request.type)}\n` +
-                `*Status:* Submitted\n` +
-                `*Owner:* <@${request.ownerSlackUserId}>`
-            }
-          }
-        ]
-      });
+      const requesterMessage = await sendRequesterStatusMessage(client, request);
+      const updatedRequest = requesterMessage.channel && requesterMessage.ts
+        ? await updateRequesterMessageReference(request.id, requesterMessage.channel, requesterMessage.ts)
+        : request;
 
-      await notifyOwnerRequestCreated(client, request);
+      await notifyOwnerRequestCreated(client, updatedRequest);
     } catch (error) {
       logger.error(error, "Failed to create request from app mention");
       await client.chat.postMessage({

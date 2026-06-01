@@ -9,13 +9,60 @@ type RequestWithChannel = Request & {
 };
 
 export async function postRequesterUpdate(client: WebClient, request: Request, actorSlackUserId: string, prefix = "Update") {
-  const text = `${prefix} on request #${request.id}: ${statusLabel(request)}`;
+  const text = `${prefix} on ${request.title}: ${statusLabel(request)}`;
+  const message = `<@${request.requesterSlackUserId}> ${text}`;
 
-  await client.chat.postMessage({
-    channel: request.channelId,
-    thread_ts: request.threadTs,
-    text: `<@${request.requesterSlackUserId}> ${text}`
+  if (request.threadTs.startsWith("manual-")) {
+    await client.chat.postMessage({
+      channel: request.requesterSlackUserId,
+      text: message
+    });
+  } else {
+    await client.chat.postMessage({
+      channel: request.channelId,
+      thread_ts: request.threadTs,
+      text: message
+    });
+  }
+
+  await recordRequesterNotification(request.id, actorSlackUserId, text);
+}
+
+export async function sendRequesterStatusMessage(client: WebClient, request: RequestWithChannel) {
+  return client.chat.postMessage({
+    channel: request.requesterSlackUserId,
+    text: `Request created: ${request.title}`,
+    blocks: requesterStatusBlocks(request)
   });
+}
+
+export async function updateRequesterStatusMessage(client: WebClient, request: RequestWithChannel) {
+  if (!request.requesterMessageChannelId || !request.requesterMessageTs) return;
+
+  await client.chat.update({
+    channel: request.requesterMessageChannelId,
+    ts: request.requesterMessageTs,
+    text: `${request.title}: ${statusLabel(request)}`,
+    blocks: requesterStatusBlocks(request)
+  });
+}
+
+export async function postRequesterNeedsInfo(client: WebClient, request: Request, actorSlackUserId: string, message: string) {
+  const text = `Need info on ${request.title}: ${message}`;
+  const body = `<@${request.requesterSlackUserId}> ${text}`;
+
+  if (request.threadTs.startsWith("manual-")) {
+    await client.chat.postMessage({
+      channel: request.requesterSlackUserId,
+      text: body
+    });
+  } else {
+    await client.chat.postMessage({
+      channel: request.channelId,
+      thread_ts: request.threadTs,
+      text: body
+    });
+  }
 
   await recordRequesterNotification(request.id, actorSlackUserId, text);
 }
@@ -25,20 +72,21 @@ export async function notifyOwnerRequestCreated(client: WebClient, request: Requ
 
   await client.chat.postMessage({
     channel: request.ownerSlackUserId,
-    text: `New request assigned to you: #${request.id} ${request.title}`,
+    text: `New request assigned to you: ${request.title}`,
     blocks: [
       {
         type: "section",
         text: {
           type: "mrkdwn",
           text:
-            `*New request assigned to you: #${request.id}*\n` +
-            `*Title:* ${request.title}\n` +
+            `*New request assigned to you*\n` +
+            `*Title:* ${escapeMrkdwn(request.title)}\n` +
             `*Channel:* <#${request.channelId}> (${company})\n` +
             `*Requester:* <@${request.requesterSlackUserId}>\n` +
             `*Type:* ${typeLabel(request.type)}\n` +
-            `*Due:* ${formatDate(request.dueDate)}\n` +
-            `*Thread:* <${threadLink(request.channelId, request.threadTs)}|Open thread>`
+            `*Status:* ${statusLabel(request)}\n` +
+            `*Due:* ${formatDate(request.dueDate)}` +
+            originalThreadLine(request)
         }
       },
       {
@@ -54,4 +102,29 @@ export async function notifyOwnerRequestCreated(client: WebClient, request: Requ
       }
     ]
   });
+}
+
+function originalThreadLine(request: Request) {
+  if (request.threadTs.startsWith("manual-")) return "";
+  return `\n*Thread:* <${threadLink(request.channelId, request.threadTs)}|Open thread>`;
+}
+
+function requesterStatusBlocks(request: RequestWithChannel) {
+  return [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text:
+          `*${escapeMrkdwn(request.title)}*\n` +
+          `*Status:* ${statusLabel(request)}\n` +
+          `*Type:* ${typeLabel(request.type)}\n` +
+          `*Due:* ${formatDate(request.dueDate)}`
+      }
+    }
+  ];
+}
+
+function escapeMrkdwn(value: string) {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

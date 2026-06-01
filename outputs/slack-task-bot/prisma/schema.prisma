@@ -86,6 +86,8 @@ model Request {
   channelId             String
   threadTs              String
   messageTs             String
+  requesterMessageChannelId String?
+  requesterMessageTs    String?
   dueDate               DateTime?
   blocker               String?
   lastReminderSentAt    DateTime?

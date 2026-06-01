@@ -98,6 +98,17 @@ export async function updateRequestSlackReference(requestId: number, messageTs: 
   });
 }
 
+export async function updateRequesterMessageReference(requestId: number, channelId: string, messageTs: string) {
+  return prisma.request.update({
+    where: { id: requestId },
+    data: {
+      requesterMessageChannelId: channelId,
+      requesterMessageTs: messageTs
+    },
+    include: includeRelations
+  });
+}
+
 export async function listAssignedOpenRequests(ownerSlackUserId: string) {
   return prisma.request.findMany({
     where: {
