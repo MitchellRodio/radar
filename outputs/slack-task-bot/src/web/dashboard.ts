@@ -5,6 +5,7 @@ import { logger } from "../lib/logger";
 import { prisma } from "../lib/prisma";
 import { mapChannelOwner } from "../services/channelOwnerService";
 import { ensureChannel, ensureUser } from "../services/userService";
+import { statusLabel, typeLabel } from "../slack/format";
 
 const slack = new WebClient(config.SLACK_BOT_TOKEN);
 
@@ -15,6 +16,11 @@ type DashboardChannel = {
   ownerSlackUserId: string | null;
   openRequests: number;
   totalRequests: number;
+};
+
+type DashboardCsm = {
+  slackUserId: string;
+  name: string | null;
 };
 
 export function startDashboardServer(port: number) {
@@ -61,22 +67,32 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
   }
 
   if (req.method === "GET" && url.pathname === "/dashboard") {
-    await renderDashboard(res, url.searchParams.get("notice") ?? "");
+    redirect(res, `/dashboard/metrics${url.search ? url.search : ""}`);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/dashboard/metrics") {
+    await renderMetrics(res, url.searchParams.get("notice") ?? "");
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/dashboard/channels") {
+    await renderChannels(res, url.searchParams.get("notice") ?? "");
     return;
   }
 
   if (req.method === "POST" && url.pathname === "/dashboard/sync") {
     await syncSlackChannels();
-    redirect(res, "/dashboard?notice=Channels synced from Slack");
+    redirect(res, "/dashboard/channels?notice=Channels synced from Slack");
     return;
   }
 
   if (req.method === "POST" && url.pathname === "/dashboard/csms") {
     const body = await readForm(req);
     const slackUserId = normalizeSlackUserId(body.get("slackUserId") ?? "");
-    const name = (body.get("name") ?? "").trim() || undefined;
+    const name = (body.get("name") ?? "").trim() || (await fetchSlackUserName(slackUserId)) || undefined;
     if (slackUserId) await ensureUser(slackUserId, name);
-    redirect(res, "/dashboard?notice=CSM added");
+    redirect(res, "/dashboard/channels?notice=CSM added");
     return;
   }
 
@@ -84,15 +100,83 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     const body = await readForm(req);
     const channelId = (body.get("channelId") ?? "").trim();
     const ownerSlackUserId = normalizeSlackUserId(body.get("ownerSlackUserId") ?? "");
+    await ensureNamedUser(ownerSlackUserId);
     if (channelId && ownerSlackUserId) await mapChannelOwner(channelId, ownerSlackUserId);
-    redirect(res, "/dashboard?notice=Channel owner updated");
+    redirect(res, "/dashboard/channels?notice=Channel owner updated");
     return;
   }
 
   sendText(res, 404, "Not found");
 }
 
-async function renderDashboard(res: ServerResponse, notice: string) {
+async function renderMetrics(res: ServerResponse, notice: string) {
+  const [channels, csms, requestStats] = await Promise.all([loadChannels(), loadCsms(), loadRequestStats()]);
+
+  sendHtml(
+    res,
+    200,
+    page(
+      "Radar Metrics",
+      `
+      ${nav("metrics")}
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Immediate metrics</p>
+          <h1>Request pulse</h1>
+          <p class="muted">A quick view of request volume, status mix, and channels with the most active work.</p>
+        </div>
+        <a class="button-link" href="/dashboard/channels">Manage channels</a>
+      </section>
+      ${notice ? `<div class="notice">${escapeHtml(notice)}</div>` : ""}
+      <section class="stat-grid">
+        ${statCard("Known channels", channels.length)}
+        ${statCard("Assigned channels", channels.filter((channel) => channel.ownerSlackUserId).length)}
+        ${statCard("CSMs", csms.length)}
+        ${statCard("Open requests", requestStats.openRequests)}
+        ${statCard("Done requests", requestStats.doneRequests)}
+        ${statCard("Waiting on customer", requestStats.waitingOnCustomer)}
+      </section>
+      <section class="grid">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Status mix</h2>
+            <span class="muted">All time</span>
+          </div>
+          ${metricList(requestStats.statusCounts)}
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Request types</h2>
+            <span class="muted">All time</span>
+          </div>
+          ${metricList(requestStats.typeCounts)}
+        </div>
+      </section>
+      <section class="grid">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Top open channels</h2>
+            <span class="muted">By open request count</span>
+          </div>
+          ${metricList(channels.filter((channel) => channel.openRequests > 0).sort((a, b) => b.openRequests - a.openRequests).slice(0, 8).map((channel) => ({
+            label: channel.companyName ?? channel.name ?? channel.slackChannelId,
+            value: channel.openRequests
+          })))}
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Recent requests</h2>
+            <span class="muted">Latest 10</span>
+          </div>
+          ${recentRequests(requestStats.recentRequests)}
+        </div>
+      </section>
+      `
+    )
+  );
+}
+
+async function renderChannels(res: ServerResponse, notice: string) {
   const [channels, csms] = await Promise.all([loadChannels(), loadCsms()]);
 
   sendHtml(
@@ -101,6 +185,7 @@ async function renderDashboard(res: ServerResponse, notice: string) {
     page(
       "Radar Dashboard",
       `
+      ${nav("channels")}
       <section class="hero">
         <div>
           <p class="eyebrow">Whop CSM Slack bot</p>
@@ -120,7 +205,7 @@ async function renderDashboard(res: ServerResponse, notice: string) {
               <input name="slackUserId" placeholder="U123ABC" required />
             </label>
             <label>Name
-              <input name="name" placeholder="Mitchell" />
+              <input name="name" placeholder="Optional, auto-filled from Slack when possible" />
             </label>
             <button type="submit">Whitelist CSM</button>
           </form>
@@ -168,13 +253,56 @@ async function renderDashboard(res: ServerResponse, notice: string) {
   );
 }
 
-function channelRow(channel: DashboardChannel, csms: Array<{ slackUserId: string; name: string | null }>) {
+function nav(active: "metrics" | "channels") {
+  return `
+    <nav class="top-nav">
+      <a class="${active === "metrics" ? "active" : ""}" href="/dashboard/metrics">Metrics</a>
+      <a class="${active === "channels" ? "active" : ""}" href="/dashboard/channels">Channels</a>
+    </nav>
+  `;
+}
+
+function statCard(label: string, value: number) {
+  return `<div class="panel stat-card"><span class="stat">${value}</span><span class="muted">${escapeHtml(label)}</span></div>`;
+}
+
+function metricList(items: Array<{ label: string; value: number }>) {
+  if (!items.length) return `<p class="muted">No data yet.</p>`;
+  const max = Math.max(...items.map((item) => item.value), 1);
+  return `
+    <div class="metric-list">
+      ${items.map((item) => `
+        <div class="metric-row">
+          <div class="metric-label"><span>${escapeHtml(item.label)}</span><strong>${item.value}</strong></div>
+          <div class="bar"><span style="width: ${Math.round((item.value / max) * 100)}%"></span></div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function recentRequests(requests: Awaited<ReturnType<typeof loadRequestStats>>["recentRequests"]) {
+  if (!requests.length) return `<p class="muted">No requests yet.</p>`;
+  return `
+    <div class="recent-list">
+      ${requests.map((request) => `
+        <div class="recent-item">
+          <strong>${escapeHtml(request.title)}</strong>
+          <span>${escapeHtml(request.channel?.companyName ?? request.channel?.name ?? request.channelId)} | ${statusLabel(request)} | ${typeLabel(request.type)}</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function channelRow(channel: DashboardChannel, csms: DashboardCsm[]) {
   const displayName = channel.companyName ?? channel.name ?? channel.slackChannelId;
+  const owner = csms.find((csm) => csm.slackUserId === channel.ownerSlackUserId);
   return `
     <tr>
       <td><strong>${escapeHtml(displayName)}</strong></td>
       <td><code>${escapeHtml(channel.slackChannelId)}</code></td>
-      <td>${channel.ownerSlackUserId ? `<code>${escapeHtml(channel.ownerSlackUserId)}</code>` : `<span class="muted">Unassigned</span>`}</td>
+      <td>${owner ? `${escapeHtml(csmLabel(owner))}<br /><code>${escapeHtml(owner.slackUserId)}</code>` : channel.ownerSlackUserId ? `<code>${escapeHtml(channel.ownerSlackUserId)}</code>` : `<span class="muted">Unassigned</span>`}</td>
       <td>${channel.openRequests}</td>
       <td>${channel.totalRequests}</td>
       <td>
@@ -182,13 +310,17 @@ function channelRow(channel: DashboardChannel, csms: Array<{ slackUserId: string
           <input type="hidden" name="channelId" value="${escapeHtml(channel.slackChannelId)}" />
           <select name="ownerSlackUserId" required>
             <option value="">Select CSM</option>
-            ${csms.map((csm) => `<option value="${escapeHtml(csm.slackUserId)}" ${csm.slackUserId === channel.ownerSlackUserId ? "selected" : ""}>${escapeHtml(csm.name ?? csm.slackUserId)}</option>`).join("")}
+            ${csms.map((csm) => `<option value="${escapeHtml(csm.slackUserId)}" ${csm.slackUserId === channel.ownerSlackUserId ? "selected" : ""}>${escapeHtml(csmLabel(csm))}</option>`).join("")}
           </select>
           <button type="submit">Save</button>
         </form>
       </td>
     </tr>
   `;
+}
+
+function csmLabel(csm: DashboardCsm) {
+  return csm.name ? `${csm.name} (${csm.slackUserId})` : csm.slackUserId;
 }
 
 async function loadChannels(): Promise<DashboardChannel[]> {
@@ -223,6 +355,36 @@ async function loadCsms() {
   });
 }
 
+async function loadRequestStats() {
+  const [openRequests, doneRequests, waitingOnCustomer, statusGroups, typeGroups, recentRequests] = await Promise.all([
+    prisma.request.count({ where: { status: { not: "DONE" } } }),
+    prisma.request.count({ where: { status: "DONE" } }),
+    prisma.request.count({ where: { customStatus: "Waiting on customer" } }),
+    prisma.request.groupBy({ by: ["status"], _count: { _all: true } }),
+    prisma.request.groupBy({ by: ["type"], _count: { _all: true } }),
+    prisma.request.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 10,
+      include: { channel: true }
+    })
+  ]);
+
+  return {
+    openRequests,
+    doneRequests,
+    waitingOnCustomer,
+    statusCounts: statusGroups.map((group) => ({
+      label: statusLabel({ status: group.status, customStatus: null }),
+      value: group._count._all
+    })),
+    typeCounts: typeGroups.map((group) => ({
+      label: typeLabel(group.type),
+      value: group._count._all
+    })),
+    recentRequests
+  };
+}
+
 async function syncSlackChannels() {
   let cursor: string | undefined;
   do {
@@ -240,6 +402,25 @@ async function syncSlackChannels() {
 
     cursor = response.response_metadata?.next_cursor || undefined;
   } while (cursor);
+}
+
+async function ensureNamedUser(slackUserId: string) {
+  if (!slackUserId) return;
+  const existing = await prisma.user.findUnique({ where: { slackUserId }, select: { name: true } });
+  if (existing?.name) return;
+  await ensureUser(slackUserId, await fetchSlackUserName(slackUserId) ?? undefined);
+}
+
+async function fetchSlackUserName(slackUserId: string) {
+  if (!slackUserId) return null;
+  try {
+    const response = await slack.users.info({ user: slackUserId });
+    const user = response.user;
+    return user?.profile?.real_name || user?.profile?.display_name || user?.real_name || user?.name || null;
+  } catch (error) {
+    logger.warn({ error, slackUserId }, "Could not fetch Slack user name");
+    return null;
+  }
 }
 
 function page(title: string, body: string) {
@@ -329,6 +510,10 @@ function css() {
     body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
     main { width: min(1180px, calc(100vw - 32px)); margin: 0 auto; padding: 32px 0 56px; }
     .hero { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding: 10px 0 24px; }
+    .top-nav { display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid var(--line); }
+    .top-nav a { color: var(--muted); text-decoration: none; padding: 10px 12px; border-bottom: 2px solid transparent; font-weight: 700; }
+    .top-nav a.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .button-link { display: inline-flex; align-items: center; min-height: 38px; border-radius: 8px; padding: 8px 13px; background: var(--accent); color: white; text-decoration: none; font-weight: 700; }
     .eyebrow { color: var(--accent); font-weight: 700; margin: 0 0 8px; text-transform: uppercase; font-size: 12px; letter-spacing: 0; }
     h1, h2 { margin: 0; letter-spacing: 0; }
     h1 { font-size: 34px; line-height: 1.1; }
@@ -345,7 +530,17 @@ function css() {
     button { min-height: 38px; border: 0; border-radius: 8px; padding: 8px 13px; background: var(--accent); color: white; font-weight: 700; cursor: pointer; }
     button:hover { background: var(--accent-strong); }
     .stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; align-items: center; }
+    .stat-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 16px; margin-bottom: 16px; }
+    .stat-card { min-height: 112px; display: flex; flex-direction: column; justify-content: center; }
     .stat { display: block; font-size: 32px; font-weight: 800; margin-bottom: 4px; }
+    .metric-list, .recent-list { display: grid; gap: 12px; }
+    .metric-row { display: grid; gap: 7px; }
+    .metric-label { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; }
+    .bar { height: 8px; border-radius: 999px; background: #edf1f5; overflow: hidden; }
+    .bar span { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+    .recent-item { display: grid; gap: 4px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+    .recent-item:last-child { border-bottom: 0; padding-bottom: 0; }
+    .recent-item span { color: var(--muted); font-size: 13px; }
     .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
     table { width: 100%; border-collapse: collapse; min-width: 860px; }
     th, td { padding: 12px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
@@ -354,6 +549,7 @@ function css() {
     code { background: #eef1f5; border-radius: 6px; padding: 2px 6px; font-size: 12px; }
     .login-panel { max-width: 440px; margin: 15vh auto 0; }
     .login { display: grid; gap: 14px; margin-top: 18px; }
-    @media (max-width: 820px) { main { width: min(100vw - 24px, 1180px); padding-top: 20px; } .hero, .panel-head { align-items: stretch; flex-direction: column; } .grid { grid-template-columns: 1fr; } .stat-row { grid-template-columns: 1fr; } }
+    @media (max-width: 1000px) { .stat-grid { grid-template-columns: repeat(3, 1fr); } }
+    @media (max-width: 820px) { main { width: min(100vw - 24px, 1180px); padding-top: 20px; } .hero, .panel-head { align-items: stretch; flex-direction: column; } .grid { grid-template-columns: 1fr; } .stat-row, .stat-grid { grid-template-columns: 1fr; } }
   `;
 }

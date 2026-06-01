@@ -271,8 +271,10 @@ Set `DASHBOARD_ADMIN_TOKEN` for dashboard access. If it is not set, the app fall
 
 The dashboard currently supports:
 
+- Metrics and channel management pages
 - Syncing public/private Slack channels the bot can see
 - Viewing all known channels
 - Whitelisting CSM Slack user IDs
 - Assigning channel ownership to CSMs
 - Viewing basic open/total request counts per channel
+- Viewing immediate request counts by status, request type, channel, and recent activity
