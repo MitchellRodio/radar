@@ -1,19 +1,22 @@
 import { App } from "@slack/bolt";
-import { RequestStatus } from "@prisma/client";
+import { RequestStatus, RequestType } from "@prisma/client";
 import { parseDueDate } from "../lib/dates";
 import { logger } from "../lib/logger";
 import { canManageRequest } from "../lib/permissions";
 import { inputModal, requestDetailModal } from "../slack/blocks";
-import { postRequesterUpdate } from "../slack/notifications";
+import { typeLabel } from "../slack/format";
+import { notifyOwnerRequestCreated, postRequesterUpdate } from "../slack/notifications";
 import {
   addInternalNote,
+  createRequestFromManualInput,
   extractSlackUserId,
   getRequest,
   parseRequestId,
   reassignRequest,
   setBlocker,
   setDueDate,
-  setStatus
+  setStatus,
+  updateRequestSlackReference
 } from "../services/requestService";
 
 export function registerActions(app: App) {
@@ -87,6 +90,72 @@ export function registerActions(app: App) {
 
   app.action("request_close_view", async ({ ack }: any) => {
     await ack({ response_action: "clear" });
+  });
+
+  app.view("request_create", async ({ ack, body, view, client }: any) => {
+    const title = modalValue(view, "title").trim();
+    const description = modalValue(view, "description").trim();
+    const type = modalSelectedValue(view, "type") as RequestType;
+    const dueDateInput = modalValue(view, "dueDate").trim();
+    const blocker = modalValue(view, "blocker").trim();
+    const dueDate = dueDateInput ? parseDueDate(dueDateInput) : null;
+
+    const errors: Record<string, string> = {};
+    if (!title) errors.title = "Add a short title.";
+    if (!description) errors.description = "Add request details.";
+    if (dueDateInput && !dueDate) errors.dueDate = "Use yyyy-mm-dd or mm/dd/yyyy.";
+
+    if (Object.keys(errors).length) {
+      await ack({ response_action: "errors", errors });
+      return;
+    }
+
+    await ack();
+
+    try {
+      const metadata = JSON.parse(view.private_metadata || "{}");
+      const channelId = metadata.channelId;
+      if (!channelId) throw new Error("Missing channel ID in request_create metadata");
+
+      const request = await createRequestFromManualInput({
+        title,
+        description,
+        type: type || "OTHER",
+        requesterSlackUserId: body.user.id,
+        channelId,
+        dueDate,
+        blocker
+      });
+
+      const result = await client.chat.postMessage({
+        channel: channelId,
+        text: `Request created: #${request.id}`,
+        unfurl_links: false,
+        blocks: [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text:
+                `Request created: *#${request.id}*\n` +
+                `*Title:* ${request.title}\n` +
+                `*Type:* ${typeLabel(request.type)}\n` +
+                `*Status:* Submitted\n` +
+                `*Owner:* <@${request.ownerSlackUserId}>`
+            }
+          }
+        ]
+      });
+
+      if (result.ts) {
+        const updatedRequest = await updateRequestSlackReference(request.id, result.ts);
+        await notifyOwnerRequestCreated(client, updatedRequest);
+      } else {
+        await notifyOwnerRequestCreated(client, request);
+      }
+    } catch (error) {
+      logger.error(error, "Failed to create request from modal");
+    }
   });
 
   app.view(/^request_custom_status:/, async ({ ack, body, view }: any) => {
@@ -184,4 +253,12 @@ async function updateCurrentModal(client: any, body: any, request: any) {
     view_id: body.view.id,
     view: requestDetailModal(request)
   });
+}
+
+function modalValue(view: any, blockId: string): string {
+  return view.state.values[blockId]?.value?.value ?? "";
+}
+
+function modalSelectedValue(view: any, blockId: string): string {
+  return view.state.values[blockId]?.value?.selected_option?.value ?? "";
 }

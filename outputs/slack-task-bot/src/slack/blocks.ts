@@ -1,4 +1,4 @@
-import { InternalNote, Request, RequestUpdate, User, Channel } from "@prisma/client";
+import { InternalNote, Request, RequestType, RequestUpdate, User, Channel } from "@prisma/client";
 import { formatDate } from "../lib/dates";
 import { statusLabel, threadLink, typeLabel } from "./format";
 
@@ -119,13 +119,92 @@ export function inputModal(callbackId: string, title: string, fieldLabel: string
   };
 }
 
+export function requestCreateModal(input: { channelId: string; initialDescription?: string }) {
+  return {
+    type: "modal",
+    callback_id: "request_create",
+    private_metadata: JSON.stringify({ channelId: input.channelId }),
+    title: { type: "plain_text", text: "New request" },
+    submit: { type: "plain_text", text: "Create" },
+    close: { type: "plain_text", text: "Cancel" },
+    blocks: [
+      {
+        type: "input",
+        block_id: "title",
+        element: {
+          type: "plain_text_input",
+          action_id: "value",
+          placeholder: { type: "plain_text", text: "Checkout link for Splitit" }
+        },
+        label: { type: "plain_text", text: "Title" }
+      },
+      {
+        type: "input",
+        block_id: "description",
+        element: {
+          type: "plain_text_input",
+          action_id: "value",
+          multiline: true,
+          ...(input.initialDescription ? { initial_value: input.initialDescription } : {}),
+          placeholder: { type: "plain_text", text: "What does the customer need?" }
+        },
+        label: { type: "plain_text", text: "Request details" }
+      },
+      {
+        type: "input",
+        block_id: "type",
+        element: {
+          type: "static_select",
+          action_id: "value",
+          initial_option: requestTypeOption("OTHER"),
+          options: [
+            requestTypeOption("CHECKOUT_LINK"),
+            requestTypeOption("SPLITIT_WHITELIST"),
+            requestTypeOption("REFUND_PAYMENT"),
+            requestTypeOption("BUG_REPORT"),
+            requestTypeOption("ENHANCEMENT_REQUEST"),
+            requestTypeOption("KYC_KYB"),
+            requestTypeOption("PAYMENT_ISSUE"),
+            requestTypeOption("ACCOUNT_SETTINGS"),
+            requestTypeOption("OTHER")
+          ]
+        },
+        label: { type: "plain_text", text: "Request type" }
+      },
+      {
+        type: "input",
+        block_id: "dueDate",
+        optional: true,
+        element: {
+          type: "plain_text_input",
+          action_id: "value",
+          placeholder: { type: "plain_text", text: "2026-06-15" }
+        },
+        label: { type: "plain_text", text: "Due date" }
+      },
+      {
+        type: "input",
+        block_id: "blocker",
+        optional: true,
+        element: {
+          type: "plain_text_input",
+          action_id: "value",
+          multiline: true,
+          placeholder: { type: "plain_text", text: "Missing info, waiting on customer, etc." }
+        },
+        label: { type: "plain_text", text: "Blocker" }
+      }
+    ]
+  };
+}
+
 export function helpBlocks() {
   return [
     section("*CSM request bot commands*"),
     section(
       "`/my-requests` - view requests assigned to you\n" +
         "`/all-requests` - admin view of all open requests\n" +
-        "`/request-create <request>` - create a request in the current channel\n" +
+        "`/request` - open a request creation form in the current channel\n" +
         "`/request-map-channel <channel_id> <@csm|user_id>` - admin maps channel ownership\n" +
         "`/request-reassign <request_id> <@csm|user_id>` - reassign a request\n" +
         "`/request-help` - show this help"
@@ -157,6 +236,13 @@ function button(text: string, actionId: string, value: string, style?: "primary"
 
 function divider() {
   return { type: "divider" };
+}
+
+function requestTypeOption(type: RequestType) {
+  return {
+    text: { type: "plain_text", text: typeLabel(type) },
+    value: type
+  };
 }
 
 function escapeMrkdwn(value: string) {

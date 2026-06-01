@@ -1,9 +1,8 @@
 import { App } from "@slack/bolt";
 import { isAdmin } from "../lib/permissions";
 import { logger } from "../lib/logger";
-import { helpBlocks, requestListBlocks } from "../slack/blocks";
+import { helpBlocks, requestCreateModal, requestListBlocks } from "../slack/blocks";
 import {
-  createRequestFromSlackMessage,
   extractSlackChannelId,
   extractSlackUserId,
   listAllOpenRequests,
@@ -47,37 +46,19 @@ export function registerCommands(app: App) {
     }
   });
 
-  app.command("/request-create", async ({ ack, command, respond, client, context }: any) => {
+  app.command("/request", async ({ ack, command, respond, client }: any) => {
     await ack();
-    const text = command.text?.trim();
-    if (!text) {
-      await respond("Usage: `/request-create I need a checkout link due 2026-06-15`");
-      return;
-    }
-
     try {
-      const request = await createRequestFromSlackMessage({
-        text,
-        requesterSlackUserId: command.user_id,
-        channelId: command.channel_id,
-        messageTs: `slash-${command.trigger_id}`,
-        threadTs: `slash-${command.trigger_id}`,
-        botUserId: context.botUserId
-      });
-
-      await respond({
-        response_type: "ephemeral",
-        text: `Request created: #${request.id}`
-      });
-
-      await client.chat.postMessage({
-        channel: command.channel_id,
-        text: `Request created: #${request.id}`,
-        unfurl_links: false
+      await client.views.open({
+        trigger_id: command.trigger_id,
+        view: requestCreateModal({
+          channelId: command.channel_id,
+          initialDescription: command.text?.trim()
+        })
       });
     } catch (error) {
-      logger.error(error, "Failed to handle /request-create");
-      await respond("Sorry, I could not create that request.");
+      logger.error(error, "Failed to handle /request");
+      await respond("Sorry, I could not open the request form.");
     }
   });
 

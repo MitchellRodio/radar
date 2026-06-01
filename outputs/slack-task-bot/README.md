@@ -69,7 +69,7 @@ Slash commands:
 
 - `/my-requests`
 - `/all-requests`
-- `/request-create`
+- `/request`
 - `/request-map-channel`
 - `/request-reassign`
 - `/request-help`
@@ -164,15 +164,18 @@ Shows open requests assigned to the logged-in CSM.
 
 Admin-only view of all open requests.
 
-### `/request-create <request text>`
+### `/request`
 
-Creates a request from the current channel. App mentions are the preferred customer submission path because they preserve the original Slack thread reference.
+Opens a Slack modal to create a request from the current channel. Text after the command is optional and pre-fills the request details field.
 
 Example:
 
 ```text
-/request-create I need a checkout link for $10,000 Splitit due 2026-06-15
+/request
+/request I need a checkout link for $10,000 Splitit
 ```
+
+The modal captures title, request details, request type, optional due date, and optional blocker. App mentions are still the preferred customer submission path because they preserve the original Slack thread reference.
 
 ### `/request-map-channel <channel_id> <@csm|user_id>`
 
@@ -252,3 +255,5 @@ This intentionally does not include:
 - Watchers
 - Internal team ownership
 - Advanced AI classification
+
+Future custom-command support can build on the same modal pattern used by `/request`: store a command definition with field configs, render those fields in a Slack modal, then map the submitted values into a normal request record.

@@ -1,4 +1,4 @@
-import { RequestStatus } from "@prisma/client";
+import { RequestStatus, RequestType } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { getChannelOwner } from "./channelOwnerService";
 import { parseRequestText } from "./requestParser";
@@ -46,6 +46,54 @@ export async function createRequestFromSlackMessage(input: {
         }
       }
     },
+    include: includeRelations
+  });
+}
+
+export async function createRequestFromManualInput(input: {
+  title: string;
+  description: string;
+  type: RequestType;
+  requesterSlackUserId: string;
+  channelId: string;
+  dueDate?: Date | null;
+  blocker?: string | null;
+}) {
+  await ensureUser(input.requesterSlackUserId);
+  await ensureChannel(input.channelId);
+
+  const ownerSlackUserId = (await getChannelOwner(input.channelId)) ?? input.requesterSlackUserId;
+  await ensureUser(ownerSlackUserId);
+
+  const placeholderTs = `manual-${Date.now()}`;
+  return prisma.request.create({
+    data: {
+      title: input.title,
+      description: input.description,
+      type: input.type,
+      dueDate: input.dueDate ?? null,
+      blocker: input.blocker?.trim() || null,
+      requesterSlackUserId: input.requesterSlackUserId,
+      ownerSlackUserId,
+      channelId: input.channelId,
+      messageTs: placeholderTs,
+      threadTs: placeholderTs,
+      updates: {
+        create: {
+          actorSlackUserId: input.requesterSlackUserId,
+          kind: "CREATED",
+          message: "Request created from Slack modal"
+        }
+      }
+    },
+    include: includeRelations
+  });
+}
+
+export async function updateRequestSlackReference(requestId: number, messageTs: string, threadTs = messageTs) {
+  return prisma.request.update({
+    where: { id: requestId },
+    data: { messageTs, threadTs },
     include: includeRelations
   });
 }

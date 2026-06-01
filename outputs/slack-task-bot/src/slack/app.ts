@@ -5,6 +5,7 @@ import { registerActions } from "../actions/registerActions";
 import { registerCommands } from "../commands/registerCommands";
 import { createRequestFromSlackMessage } from "../services/requestService";
 import { typeLabel } from "./format";
+import { notifyOwnerRequestCreated } from "./notifications";
 
 export function createSlackApp() {
   const app = new App({
@@ -44,6 +45,8 @@ export function createSlackApp() {
           }
         ]
       });
+
+      await notifyOwnerRequestCreated(client, request);
     } catch (error) {
       logger.error(error, "Failed to create request from app mention");
       await client.chat.postMessage({
