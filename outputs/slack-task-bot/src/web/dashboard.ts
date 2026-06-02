@@ -1,11 +1,39 @@
 import { createServer, IncomingMessage, ServerResponse } from "http";
+import { createHmac, timingSafeEqual } from "crypto";
 import { WebClient } from "@slack/web-api";
+import type { RequestStatus, RequestType } from "@prisma/client";
 import { config } from "../lib/config";
+import { parseDueDate } from "../lib/dates";
 import { logger } from "../lib/logger";
+import { canManageRequest, isAdmin } from "../lib/permissions";
 import { prisma } from "../lib/prisma";
 import { mapChannelOwner } from "../services/channelOwnerService";
+import {
+  addInternalNote,
+  createRequestFromManualInput,
+  extractSlackChannelId,
+  extractSlackUserId,
+  getRequest,
+  listAllOpenRequests,
+  listAssignedOpenRequests,
+  parseRequestId,
+  reassignRequest,
+  setBlocker,
+  setDueDate,
+  setStatus,
+  updateRequesterMessageReference
+} from "../services/requestService";
 import { ensureChannel, ensureUser } from "../services/userService";
+import { helpBlocks, inputModal, requestCreateModal, requestDetailModal, requestListBlocks } from "../slack/blocks";
 import { statusLabel, typeLabel } from "../slack/format";
+import {
+  notifyOwnerRequestCreated,
+  postRequesterNeedsInfo,
+  postRequesterUpdate,
+  sendRequesterEphemeralStatusMessage,
+  sendRequesterStatusMessage,
+  updateRequesterStatusMessage
+} from "../slack/notifications";
 
 const slack = new WebClient(config.SLACK_BOT_TOKEN);
 
@@ -48,6 +76,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
 
   if (url.pathname === "/health") {
     sendText(res, 200, "ok");
+    return;
+  }
+
+  if (url.pathname === "/slack/events" && req.method === "POST") {
+    await handleSlackHttpRequest(req, res);
     return;
   }
 
@@ -107,6 +140,372 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
   }
 
   sendText(res, 404, "Not found");
+}
+
+async function handleSlackHttpRequest(req: IncomingMessage, res: ServerResponse) {
+  const rawBody = await readBody(req);
+
+  if (!isValidSlackSignature(req, rawBody)) {
+    logger.warn("Rejected Slack HTTP request with invalid signature");
+    sendText(res, 401, "Invalid signature");
+    return;
+  }
+
+  if ((req.headers["content-type"] ?? "").includes("application/json")) {
+    const payload = JSON.parse(rawBody || "{}");
+    if (payload.type === "url_verification" && payload.challenge) {
+      sendText(res, 200, payload.challenge);
+      return;
+    }
+    sendText(res, 200, "ok");
+    return;
+  }
+
+  const body = new URLSearchParams(rawBody);
+  if (body.get("ssl_check") === "1") {
+    sendText(res, 200, "ok");
+    return;
+  }
+
+  const interactivePayload = body.get("payload");
+  if (interactivePayload) {
+    await handleSlackInteraction(JSON.parse(interactivePayload), res);
+    return;
+  }
+
+  const command = body.get("command") ?? "";
+  const userId = body.get("user_id") ?? "";
+  const channelId = body.get("channel_id") ?? "";
+  const text = body.get("text")?.trim() ?? "";
+
+  try {
+    switch (command) {
+      case "/request": {
+        await slack.views.open({
+          trigger_id: body.get("trigger_id") ?? "",
+          view: requestCreateModal({ channelId, initialDescription: text }) as any
+        });
+        sendText(res, 200, "");
+        return;
+      }
+
+      case "/my-requests": {
+        const requests = await listAssignedOpenRequests(userId);
+        sendSlackJson(res, { response_type: "ephemeral", blocks: requestListBlocks(requests, "My open requests") });
+        return;
+      }
+
+      case "/all-requests": {
+        if (!(await isAdmin(userId))) {
+          logger.warn({ userId }, "Non-admin used /all-requests over HTTP; allowing for MVP visibility");
+        }
+        const requests = await listAllOpenRequests();
+        sendSlackJson(res, { response_type: "ephemeral", blocks: requestListBlocks(requests, "All open requests") });
+        return;
+      }
+
+      case "/request-map-channel": {
+        if (!(await isAdmin(userId))) {
+          sendSlackJson(res, { response_type: "ephemeral", text: "Only admins can map channel ownership." });
+          return;
+        }
+
+        const [channelArg, ownerArg] = text.split(/\s+/);
+        const mappedChannelId = extractSlackChannelId(channelArg ?? "");
+        const ownerSlackUserId = extractSlackUserId(ownerArg ?? "");
+
+        if (!mappedChannelId || !ownerSlackUserId) {
+          sendSlackJson(res, { response_type: "ephemeral", text: "Usage: `/request-map-channel C123456 <@U123456>`" });
+          return;
+        }
+
+        await mapChannelOwner(mappedChannelId, ownerSlackUserId);
+        sendSlackJson(res, { response_type: "ephemeral", text: `Mapped <#${mappedChannelId}> to <@${ownerSlackUserId}>.` });
+        return;
+      }
+
+      case "/request-reassign": {
+        const [requestArg, ownerArg] = text.split(/\s+/);
+        const requestId = parseRequestId(requestArg ?? "");
+        const ownerSlackUserId = extractSlackUserId(ownerArg ?? "");
+
+        if (!requestId || !ownerSlackUserId) {
+          sendSlackJson(res, { response_type: "ephemeral", text: "Usage: `/request-reassign 123 <@U123456>`" });
+          return;
+        }
+
+        if (!(await isAdmin(userId))) {
+          sendSlackJson(res, {
+            response_type: "ephemeral",
+            text: "Only admins can reassign from this slash command. CSMs can reassign from the request detail view."
+          });
+          return;
+        }
+
+        await reassignRequest(requestId, userId, ownerSlackUserId);
+        sendSlackJson(res, { response_type: "ephemeral", text: `Request ${requestId} reassigned to <@${ownerSlackUserId}>.` });
+        return;
+      }
+
+      case "/request-help": {
+        sendSlackJson(res, { response_type: "ephemeral", blocks: helpBlocks() });
+        return;
+      }
+
+      default:
+        sendSlackJson(res, { response_type: "ephemeral", text: "Unknown request command. Try `/request-help`." });
+        return;
+    }
+  } catch (error) {
+    logger.error({ error, command }, "Failed to handle Slack HTTP slash command");
+    sendSlackJson(res, { response_type: "ephemeral", text: "Sorry, I could not handle that command." });
+  }
+}
+
+async function handleSlackInteraction(payload: any, res: ServerResponse) {
+  try {
+    if (payload.type === "block_actions") {
+      await handleSlackBlockAction(payload, res);
+      return;
+    }
+
+    if (payload.type === "view_submission") {
+      await handleSlackViewSubmission(payload, res);
+      return;
+    }
+
+    sendText(res, 200, "");
+  } catch (error) {
+    logger.error({ error, payloadType: payload?.type }, "Failed to handle Slack interaction over HTTP");
+    sendText(res, 200, "");
+  }
+}
+
+async function handleSlackBlockAction(payload: any, res: ServerResponse) {
+  const action = payload.actions?.[0];
+  const actionId = action?.action_id;
+  const [valueIdPart] = String(action?.value ?? "").split(":");
+  const requestId = parseRequestId(valueIdPart);
+  const actorSlackUserId = payload.user?.id;
+
+  if (actionId === "request_close_view") {
+    sendSlackJson(res, { response_action: "clear" });
+    return;
+  }
+
+  sendText(res, 200, "");
+
+  if (!actionId || !actorSlackUserId) return;
+
+  if (actionId === "request_view" || actionId === "owner_request_view") {
+    const request = requestId ? await getRequest(requestId) : null;
+    if (!request) return;
+    await slack.views.open({ trigger_id: payload.trigger_id, view: requestDetailModal(request) as any });
+    return;
+  }
+
+  if (!requestId || !(await canManageRequest(actorSlackUserId, requestId))) return;
+
+  if (actionId === "request_set_status") {
+    const [idPart, statusPart] = action.value.split(":");
+    const statusRequestId = parseRequestId(idPart);
+    if (!statusRequestId) return;
+
+    const request = await setStatus(statusRequestId, actorSlackUserId, statusPart as RequestStatus);
+    await updateRequesterStatusMessage(slack, request);
+    if (statusPart === "DONE") await postRequesterUpdate(slack, request, actorSlackUserId);
+    await updateCurrentSlackModal(payload, request);
+    return;
+  }
+
+  if (actionId === "request_custom_status_open") {
+    await openInput(payload.trigger_id, `request_custom_status:${requestId}`, "Custom status", "Status", "", false);
+    return;
+  }
+
+  if (actionId === "request_due_date_open") {
+    await openInput(payload.trigger_id, `request_due_date:${requestId}`, "Due date", "Date, yyyy-mm-dd", "", false);
+    return;
+  }
+
+  if (actionId === "request_blocker_open") {
+    const request = await getRequest(requestId);
+    await openInput(payload.trigger_id, `request_blocker:${requestId}`, "Blocker", "Blocker, blank to clear", request?.blocker ?? "", true);
+    return;
+  }
+
+  if (actionId === "request_note_open") {
+    await openInput(payload.trigger_id, `request_note:${requestId}`, "Internal note", "Note", "", true);
+    return;
+  }
+
+  if (actionId === "request_reassign_open") {
+    await openInput(payload.trigger_id, `request_reassign:${requestId}`, "Reassign CSM", "CSM Slack user ID or mention", "", false);
+    return;
+  }
+
+  if (actionId === "request_needs_info_open") {
+    await openInput(payload.trigger_id, `request_needs_info:${requestId}`, "Need info", "Message to requester", "", true);
+    return;
+  }
+
+  if (actionId === "request_notify_requester") {
+    const request = await getRequest(requestId);
+    if (!request) return;
+    await updateRequesterStatusMessage(slack, request);
+    await postRequesterUpdate(slack, request, actorSlackUserId);
+    await updateCurrentSlackModal(payload, request);
+  }
+}
+
+async function handleSlackViewSubmission(payload: any, res: ServerResponse) {
+  const view = payload.view;
+  const callbackId = view?.callback_id ?? "";
+  const actorSlackUserId = payload.user?.id;
+
+  if (!actorSlackUserId) {
+    sendText(res, 200, "");
+    return;
+  }
+
+  if (callbackId === "request_create") {
+    const title = modalValue(view, "title").trim();
+    const description = modalValue(view, "description").trim();
+    const type = modalSelectedValue(view, "type") as RequestType;
+    const dueDateInput = modalValue(view, "dueDate").trim();
+    const blocker = modalValue(view, "blocker").trim();
+    const dueDate = dueDateInput ? parseDueDate(dueDateInput) : null;
+
+    const errors: Record<string, string> = {};
+    if (!title) errors.title = "Add a short title.";
+    if (!description) errors.description = "Add request details.";
+    if (dueDateInput && !dueDate) errors.dueDate = "Use yyyy-mm-dd or mm/dd/yyyy.";
+
+    if (Object.keys(errors).length) {
+      sendSlackJson(res, { response_action: "errors", errors });
+      return;
+    }
+
+    sendText(res, 200, "");
+
+    const metadata = JSON.parse(view.private_metadata || "{}");
+    const channelId = metadata.channelId;
+    if (!channelId) throw new Error("Missing channel ID in request_create metadata");
+
+    const request = await createRequestFromManualInput({
+      title,
+      description,
+      type: type || "OTHER",
+      requesterSlackUserId: actorSlackUserId,
+      channelId,
+      dueDate,
+      blocker
+    });
+
+    const result = await sendRequesterStatusMessage(slack, request);
+    if (result.channel && result.ts) {
+      const updatedRequest = await updateRequesterMessageReference(request.id, result.channel, result.ts);
+      await sendRequesterEphemeralStatusMessage(slack, updatedRequest);
+      await notifyOwnerRequestCreated(slack, updatedRequest);
+    } else {
+      await sendRequesterEphemeralStatusMessage(slack, request);
+      await notifyOwnerRequestCreated(slack, request);
+    }
+    return;
+  }
+
+  if (callbackId.startsWith("request_custom_status:")) {
+    await handleSlackInputSubmission(res, payload, async (requestId, value) => setStatus(requestId, actorSlackUserId, "CUSTOM", value.trim()), updateRequesterStatusMessage);
+    return;
+  }
+
+  if (callbackId.startsWith("request_due_date:")) {
+    const value = modalValue(view, "input").trim();
+    const dueDate = value ? parseDueDate(value) : null;
+    if (value && !dueDate) {
+      sendSlackJson(res, { response_action: "errors", errors: { input: "Use yyyy-mm-dd or mm/dd/yyyy." } });
+      return;
+    }
+
+    await handleSlackInputSubmission(res, payload, async (requestId) => setDueDate(requestId, actorSlackUserId, dueDate), updateRequesterStatusMessage);
+    return;
+  }
+
+  if (callbackId.startsWith("request_blocker:")) {
+    await handleSlackInputSubmission(res, payload, async (requestId, value) => setBlocker(requestId, actorSlackUserId, value.trim() || null));
+    return;
+  }
+
+  if (callbackId.startsWith("request_note:")) {
+    await handleSlackInputSubmission(res, payload, async (requestId, value) => addInternalNote(requestId, actorSlackUserId, value.trim()));
+    return;
+  }
+
+  if (callbackId.startsWith("request_reassign:")) {
+    const ownerSlackUserId = extractSlackUserId(modalValue(view, "input"));
+    if (!ownerSlackUserId) {
+      sendSlackJson(res, { response_action: "errors", errors: { input: "Enter a Slack user mention or user ID." } });
+      return;
+    }
+    await handleSlackInputSubmission(res, payload, async (requestId) => reassignRequest(requestId, actorSlackUserId, ownerSlackUserId));
+    return;
+  }
+
+  if (callbackId.startsWith("request_needs_info:")) {
+    await handleSlackInputSubmission(res, payload, async (requestId, value) => {
+      const request = await setStatus(requestId, actorSlackUserId, "CUSTOM", "Waiting on customer");
+      await updateRequesterStatusMessage(slack, request);
+      await postRequesterNeedsInfo(slack, request, actorSlackUserId, value.trim());
+      return request;
+    });
+    return;
+  }
+
+  sendText(res, 200, "");
+}
+
+async function handleSlackInputSubmission(
+  res: ServerResponse,
+  payload: any,
+  update: (requestId: number, value: string) => Promise<any | null>,
+  afterUpdate?: (client: any, request: any) => Promise<void>
+) {
+  const requestId = parseRequestId(payload.view.callback_id.split(":")[1]);
+  const actorSlackUserId = payload.user?.id;
+  const value = modalValue(payload.view, "input");
+
+  if (!requestId || !actorSlackUserId || !(await canManageRequest(actorSlackUserId, requestId))) {
+    sendText(res, 200, "");
+    return;
+  }
+
+  try {
+    const request = await update(requestId, value);
+    if (!request) {
+      sendText(res, 200, "");
+      return;
+    }
+    if (afterUpdate) await afterUpdate(slack, request);
+    sendSlackJson(res, { response_action: "update", view: requestDetailModal(request) });
+  } catch (error) {
+    logger.error(error, "Failed to submit request modal over HTTP");
+    sendSlackJson(res, { response_action: "errors", errors: { input: "Could not save this update." } });
+  }
+}
+
+async function openInput(triggerId: string, callbackId: string, title: string, label: string, initialValue: string, multiline: boolean) {
+  await slack.views.push({
+    trigger_id: triggerId,
+    view: inputModal(callbackId, title, label, initialValue, multiline) as any
+  });
+}
+
+async function updateCurrentSlackModal(payload: any, request: any) {
+  if (!payload.view?.id) return;
+  await slack.views.update({
+    view_id: payload.view.id,
+    view: requestDetailModal(request) as any
+  });
 }
 
 async function renderMetrics(res: ServerResponse, notice: string) {
@@ -469,28 +868,69 @@ function parseCookies(cookieHeader: string) {
 }
 
 async function readForm(req: IncomingMessage) {
+  return new URLSearchParams(await readBody(req));
+}
+
+async function readBody(req: IncomingMessage) {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
-  return new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function isValidSlackSignature(req: IncomingMessage, rawBody: string) {
+  const signature = req.headers["x-slack-signature"];
+  const timestamp = req.headers["x-slack-request-timestamp"];
+
+  if (typeof signature !== "string" || typeof timestamp !== "string") return false;
+
+  const timestampNumber = Number(timestamp);
+  if (!Number.isFinite(timestampNumber)) return false;
+
+  const fiveMinutesInSeconds = 60 * 5;
+  if (Math.abs(Math.floor(Date.now() / 1000) - timestampNumber) > fiveMinutesInSeconds) return false;
+
+  const base = `v0:${timestamp}:${rawBody}`;
+  const digest = `v0=${createHmac("sha256", config.SLACK_SIGNING_SECRET).update(base).digest("hex")}`;
+
+  const signatureBuffer = Buffer.from(signature);
+  const digestBuffer = Buffer.from(digest);
+  return signatureBuffer.length === digestBuffer.length && timingSafeEqual(signatureBuffer, digestBuffer);
 }
 
 function normalizeSlackUserId(value: string) {
   return value.trim().match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/)?.[1] ?? value.trim();
 }
 
+function modalValue(view: any, blockId: string): string {
+  return view.state.values[blockId]?.value?.value ?? "";
+}
+
+function modalSelectedValue(view: any, blockId: string): string {
+  return view.state.values[blockId]?.value?.selected_option?.value ?? "";
+}
+
 function redirect(res: ServerResponse, location: string) {
+  if (res.writableEnded) return;
   res.writeHead(303, { Location: location });
   res.end();
 }
 
 function sendText(res: ServerResponse, status: number, text: string) {
+  if (res.writableEnded) return;
   res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8" });
   res.end(text);
 }
 
+function sendSlackJson(res: ServerResponse, payload: unknown) {
+  if (res.writableEnded) return;
+  res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify(payload));
+}
+
 function sendHtml(res: ServerResponse, status: number, html: string) {
+  if (res.writableEnded) return;
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
   res.end(html);
 }
