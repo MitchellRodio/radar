@@ -1,7 +1,8 @@
 import { RequestStatus, RequestType } from "@prisma/client";
 import { prisma } from "../lib/prisma";
+import { analyzeRequestWithAi } from "./aiRequestAnalyzer";
 import { getChannelOwner } from "./channelOwnerService";
-import { analyzeRequestMetadata, parseRequestText } from "./requestParser";
+import { parseRequestText } from "./requestParser";
 import { ensureChannel, ensureUser } from "./userService";
 
 const includeRelations = {
@@ -21,6 +22,12 @@ export async function createRequestFromSlackMessage(input: {
   botUserId?: string;
 }) {
   const parsed = parseRequestText(input.text, input.botUserId);
+  const aiMetadata = await analyzeRequestWithAi({
+    title: parsed.title,
+    description: parsed.description,
+    fallbackType: parsed.type,
+    dueDate: parsed.dueDate
+  });
   await ensureUser(input.requesterSlackUserId);
   await ensureChannel(input.channelId);
 
@@ -31,12 +38,12 @@ export async function createRequestFromSlackMessage(input: {
     data: {
       title: parsed.title,
       description: parsed.description,
-      type: parsed.type,
-      aiTags: parsed.aiTags,
-      intent: parsed.intent,
-      extractedFields: parsed.extractedFields,
-      suggestedNextStep: parsed.suggestedNextStep,
-      confidence: parsed.confidence,
+      type: aiMetadata.type,
+      aiTags: aiMetadata.aiTags,
+      intent: aiMetadata.intent,
+      extractedFields: aiMetadata.extractedFields,
+      suggestedNextStep: aiMetadata.suggestedNextStep,
+      confidence: aiMetadata.confidence,
       dueDate: parsed.dueDate,
       requesterSlackUserId: input.requesterSlackUserId,
       ownerSlackUserId,
@@ -70,13 +77,18 @@ export async function createRequestFromManualInput(input: {
   const ownerSlackUserId = (await getChannelOwner(input.channelId)) ?? input.requesterSlackUserId;
   await ensureUser(ownerSlackUserId);
 
-  const aiMetadata = analyzeRequestMetadata(`${input.title}\n${input.description}`, input.type, input.dueDate ?? null);
+  const aiMetadata = await analyzeRequestWithAi({
+    title: input.title,
+    description: input.description,
+    fallbackType: input.type,
+    dueDate: input.dueDate ?? null
+  });
   const placeholderTs = `manual-${Date.now()}`;
   return prisma.request.create({
     data: {
       title: input.title,
       description: input.description,
-      type: input.type,
+      type: aiMetadata.type,
       aiTags: aiMetadata.aiTags,
       intent: aiMetadata.intent,
       extractedFields: aiMetadata.extractedFields,

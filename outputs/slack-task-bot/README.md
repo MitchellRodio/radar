@@ -90,6 +90,13 @@ Fill in:
 - `SLACK_SIGNING_SECRET`
 - `SLACK_APP_TOKEN`
 - `ADMIN_SLACK_USER_IDS`
+- `OPENAI_API_KEY`
+
+Optional:
+
+- `OPENAI_MODEL` defaults to `gpt-5-nano`
+
+In Render, add `OPENAI_API_KEY` under the `whop-slack-task-bot` service's **Environment** tab, then redeploy. Locally, put the same key in `.env`.
 
 For Socket Mode local development:
 
@@ -204,7 +211,7 @@ Shows command help.
 
 ## Request Types And Flexible Metadata
 
-The bot detects request type using conservative keyword matching and defaults to `Other` when confidence is low. Request type is only a broad grouping for common workflows, not a complete taxonomy. Every request also stores flexible metadata so random one-off asks can be tracked without adding a new enum or migration:
+The bot uses OpenAI to classify and enrich requests when `OPENAI_API_KEY` is set. If the key is missing or OpenAI fails, it falls back to conservative keyword matching. Request type is only a broad grouping for common workflows, not a complete taxonomy. Every request stores flexible metadata so random one-off asks can be tracked without adding a new enum or migration:
 
 - `aiTags`
 - `intent`
@@ -261,7 +268,6 @@ This intentionally does not include:
 - Escalation flows
 - Watchers
 - Internal team ownership
-- Advanced AI classification
 
 Future custom-command support can build on the same modal pattern used by `/request`: store a command definition with field configs, render those fields in a Slack modal, then map the submitted values into a normal request record.
 

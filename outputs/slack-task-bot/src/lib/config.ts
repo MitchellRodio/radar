@@ -14,6 +14,8 @@ const schema = z.object({
   PORT: z.coerce.number().default(3000),
   ADMIN_SLACK_USER_IDS: z.string().optional().default(""),
   DASHBOARD_ADMIN_TOKEN: z.string().optional().default(""),
+  OPENAI_API_KEY: z.string().optional().default(""),
+  OPENAI_MODEL: z.string().optional().default("gpt-5-nano"),
   REMINDER_INTERVAL_MINUTES: z.coerce.number().default(60)
 });
 

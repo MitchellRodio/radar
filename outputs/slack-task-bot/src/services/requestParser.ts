@@ -16,11 +16,6 @@ export type ParsedRequest = {
   title: string;
   description: string;
   type: RequestType;
-  aiTags: string[];
-  intent: string;
-  extractedFields: Prisma.InputJsonValue;
-  suggestedNextStep: string;
-  confidence: number;
   dueDate: Date | null;
 };
 
@@ -32,14 +27,10 @@ export function parseRequestText(rawText: string, botUserId?: string): ParsedReq
     .replace(/\bdue(?: date)?\s*[:=]?\s*\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/i, "")
     .trim();
 
-  const type = detectType(text);
-  const aiMetadata = analyzeRequestMetadata(cleanText || text || rawText, type, dueDate);
-
   return {
     title: toTitle(cleanText || "New customer request"),
     description: cleanText || text || rawText,
-    type,
-    ...aiMetadata,
+    type: detectType(text),
     dueDate
   };
 }
