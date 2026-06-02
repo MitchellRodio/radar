@@ -61,12 +61,17 @@ export function requestDetailBlocks(request: RequestWithRelations) {
         `*Thread:* ${threadText(request)}\n` +
         `*Type:* ${typeLabel(request.type)}\n` +
         `*Status:* ${statusLabel(request)}\n` +
+        `*AI tags:* ${escapeMrkdwn(request.aiTags.length ? request.aiTags.join(", ") : "None")}\n` +
+        `*Intent:* ${escapeMrkdwn(request.intent || "None")}\n` +
+        `*Suggested next step:* ${escapeMrkdwn(request.suggestedNextStep || "None")}\n` +
+        `*Confidence:* ${formatConfidence(request.confidence)}\n` +
         `*Owner CSM:* <@${request.ownerSlackUserId}>\n` +
         `*Due date:* ${formatDate(request.dueDate)}\n` +
         `*Blocker:* ${escapeMrkdwn(request.blocker ?? "None")}\n` +
         `*Created:* ${formatDate(request.createdAt)}\n` +
         `*Updated:* ${formatDate(request.updatedAt)}`
     ),
+    section(`*Extracted fields*\n${escapeMrkdwn(formatExtractedFields(request.extractedFields))}`),
     divider(),
     section(`*Internal notes*\n${notes}`),
     actions([
@@ -237,6 +242,15 @@ function button(text: string, actionId: string, value: string, style?: "primary"
     value,
     ...(style ? { style } : {})
   };
+}
+
+function formatConfidence(confidence: number) {
+  return `${Math.round(confidence * 100)}%`;
+}
+
+function formatExtractedFields(value: unknown) {
+  if (!value || (typeof value === "object" && Object.keys(value).length === 0)) return "None";
+  return JSON.stringify(value, null, 2);
 }
 
 function divider() {

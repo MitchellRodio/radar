@@ -1,7 +1,7 @@
 import { RequestStatus, RequestType } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { getChannelOwner } from "./channelOwnerService";
-import { parseRequestText } from "./requestParser";
+import { analyzeRequestMetadata, parseRequestText } from "./requestParser";
 import { ensureChannel, ensureUser } from "./userService";
 
 const includeRelations = {
@@ -32,6 +32,11 @@ export async function createRequestFromSlackMessage(input: {
       title: parsed.title,
       description: parsed.description,
       type: parsed.type,
+      aiTags: parsed.aiTags,
+      intent: parsed.intent,
+      extractedFields: parsed.extractedFields,
+      suggestedNextStep: parsed.suggestedNextStep,
+      confidence: parsed.confidence,
       dueDate: parsed.dueDate,
       requesterSlackUserId: input.requesterSlackUserId,
       ownerSlackUserId,
@@ -65,12 +70,18 @@ export async function createRequestFromManualInput(input: {
   const ownerSlackUserId = (await getChannelOwner(input.channelId)) ?? input.requesterSlackUserId;
   await ensureUser(ownerSlackUserId);
 
+  const aiMetadata = analyzeRequestMetadata(`${input.title}\n${input.description}`, input.type, input.dueDate ?? null);
   const placeholderTs = `manual-${Date.now()}`;
   return prisma.request.create({
     data: {
       title: input.title,
       description: input.description,
       type: input.type,
+      aiTags: aiMetadata.aiTags,
+      intent: aiMetadata.intent,
+      extractedFields: aiMetadata.extractedFields,
+      suggestedNextStep: aiMetadata.suggestedNextStep,
+      confidence: aiMetadata.confidence,
       dueDate: input.dueDate ?? null,
       blocker: input.blocker?.trim() || null,
       requesterSlackUserId: input.requesterSlackUserId,

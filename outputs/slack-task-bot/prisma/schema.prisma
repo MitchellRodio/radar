@@ -79,6 +79,11 @@ model Request {
   title                 String
   description           String
   type                  RequestType   @default(OTHER)
+  aiTags                String[]       @default([])
+  intent                String         @default("")
+  extractedFields       Json           @default("{}")
+  suggestedNextStep     String         @default("")
+  confidence            Float          @default(0)
   status                RequestStatus @default(SUBMITTED)
   customStatus          String?
   requesterSlackUserId  String

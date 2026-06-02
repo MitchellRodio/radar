@@ -202,9 +202,15 @@ Example:
 
 Shows command help.
 
-## Request Types
+## Request Types And Flexible Metadata
 
-The bot detects request type using conservative keyword matching and defaults to `Other` when confidence is low.
+The bot detects request type using conservative keyword matching and defaults to `Other` when confidence is low. Request type is only a broad grouping for common workflows, not a complete taxonomy. Every request also stores flexible metadata so random one-off asks can be tracked without adding a new enum or migration:
+
+- `aiTags`
+- `intent`
+- `extractedFields`
+- `suggestedNextStep`
+- `confidence`
 
 - Checkout link
 - Splitit whitelist

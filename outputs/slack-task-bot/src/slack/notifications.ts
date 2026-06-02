@@ -94,6 +94,9 @@ export async function notifyOwnerRequestCreated(client: WebClient, request: Requ
             `*Requester:* <@${request.requesterSlackUserId}>\n` +
             `*Type:* ${typeLabel(request.type)}\n` +
             `*Status:* ${statusLabel(request)}\n` +
+            `*Intent:* ${escapeMrkdwn(request.intent || "None")}\n` +
+            `*Tags:* ${escapeMrkdwn(request.aiTags.length ? request.aiTags.join(", ") : "None")}\n` +
+            `*Next step:* ${escapeMrkdwn(request.suggestedNextStep || "Review and triage this request.")}\n` +
             `*Due:* ${formatDate(request.dueDate)}` +
             originalThreadLine(request)
         }
@@ -129,6 +132,7 @@ function requesterStatusBlocks(request: RequestWithChannel) {
           `*${escapeMrkdwn(request.title)}*\n` +
           `*Status:* ${statusLabel(request)}\n` +
           `*Type:* ${typeLabel(request.type)}\n` +
+          `*Intent:* ${escapeMrkdwn(request.intent || "None")}\n` +
           `*Due:* ${formatDate(request.dueDate)}`
       }
     }
