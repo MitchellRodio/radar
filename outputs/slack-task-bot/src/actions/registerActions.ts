@@ -36,7 +36,7 @@ export function registerActions(app: App) {
     await openRequestDetailFromAction(client, body, action);
   });
 
-  app.action("request_set_status", async ({ ack, body, client, action }: any) => {
+  app.action(/^request_set_(submitted|in_progress|done)$/, async ({ ack, body, client, action }: any) => {
     await ack();
     const [idPart, statusPart] = action.value.split(":");
     const requestId = parseRequestId(idPart);

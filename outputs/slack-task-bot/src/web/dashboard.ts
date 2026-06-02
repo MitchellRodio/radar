@@ -306,7 +306,7 @@ async function handleSlackBlockAction(payload: any, res: ServerResponse) {
 
   if (!requestId || !(await canManageRequest(actorSlackUserId, requestId))) return;
 
-  if (actionId === "request_set_status") {
+  if (isStatusActionId(actionId)) {
     const [idPart, statusPart] = action.value.split(":");
     const statusRequestId = parseRequestId(idPart);
     if (!statusRequestId) return;
@@ -901,6 +901,10 @@ function isValidSlackSignature(req: IncomingMessage, rawBody: string) {
 
 function normalizeSlackUserId(value: string) {
   return value.trim().match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/)?.[1] ?? value.trim();
+}
+
+function isStatusActionId(actionId: string) {
+  return actionId === "request_set_submitted" || actionId === "request_set_in_progress" || actionId === "request_set_done";
 }
 
 function modalValue(view: any, blockId: string): string {

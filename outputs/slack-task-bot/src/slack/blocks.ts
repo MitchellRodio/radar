@@ -70,9 +70,9 @@ export function requestDetailBlocks(request: RequestWithRelations) {
     divider(),
     section(`*Internal notes*\n${notes}`),
     actions([
-      button("Set Submitted", "request_set_status", `${request.id}:SUBMITTED`),
-      button("Set In Progress", "request_set_status", `${request.id}:IN_PROGRESS`),
-      button("Set Done", "request_set_status", `${request.id}:DONE`, "primary")
+      button("Set Submitted", "request_set_submitted", `${request.id}:SUBMITTED`),
+      button("Set In Progress", "request_set_in_progress", `${request.id}:IN_PROGRESS`),
+      button("Set Done", "request_set_done", `${request.id}:DONE`, "primary")
     ]),
     actions([
       button("Set Custom Status", "request_custom_status_open", String(request.id)),
