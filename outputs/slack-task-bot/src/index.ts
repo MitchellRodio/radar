@@ -2,6 +2,7 @@ import { config } from "./lib/config";
 import { logger } from "./lib/logger";
 import { createSlackApp } from "./slack/app";
 import { startReminderJob } from "./jobs/reminders";
+import { startSplititAutomationJob } from "./jobs/splititAutomation";
 import { startDashboardServer } from "./web/dashboard";
 import { ensureUser } from "./services/userService";
 
@@ -10,6 +11,7 @@ async function main() {
 
   const app = createSlackApp();
   startReminderJob(app);
+  startSplititAutomationJob(app);
   if (config.SLACK_SOCKET_MODE) {
     startDashboardServer(config.PORT);
   }

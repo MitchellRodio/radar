@@ -7,7 +7,7 @@ import { parseDueDate } from "../lib/dates";
 import { logger } from "../lib/logger";
 import { canManageRequest, isAdmin } from "../lib/permissions";
 import { prisma } from "../lib/prisma";
-import { getOpenAiSettingsStatus, saveOpenAiSettings } from "../services/appSettingsService";
+import { getOpenAiSettingsStatus, getSplititAgentSettingsStatus, saveOpenAiSettings, saveSplititAgentSettings } from "../services/appSettingsService";
 import { mapChannelOwner } from "../services/channelOwnerService";
 import {
   addInternalNote,
@@ -25,6 +25,7 @@ import {
   updateRequesterMessageReference
 } from "../services/requestService";
 import { ensureChannel, ensureUser } from "../services/userService";
+import { queueSplititAutomation } from "../services/splititAutomationService";
 import { helpBlocks, inputModal, requestCreateModal, requestDetailModal, requestListBlocks } from "../slack/blocks";
 import { statusLabel, typeLabel } from "../slack/format";
 import {
@@ -140,6 +141,17 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       clearApiKey: body.get("clearOpenAiKey") === "on"
     });
     redirect(res, "/dashboard/settings?notice=OpenAI settings updated");
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/dashboard/settings/splitit-agent") {
+    const body = await readForm(req);
+    await saveSplititAgentSettings({
+      webhookUrl: body.get("splititWebhookUrl")?.toString(),
+      webhookSecret: body.get("splititWebhookSecret")?.toString(),
+      clearWebhookSecret: body.get("clearSplititWebhookSecret") === "on"
+    });
+    redirect(res, "/dashboard/settings?notice=Splitit agent settings updated");
     return;
   }
 
@@ -393,6 +405,13 @@ async function handleSlackBlockAction(payload: any, res: ServerResponse) {
     await updateRequesterStatusMessage(slack, request);
     await postRequesterUpdate(slack, request, actorSlackUserId);
     await updateCurrentSlackModal(payload, request);
+    return;
+  }
+
+  if (actionId === "request_splitit_agent_queue") {
+    const result = await queueSplititAutomation(slack, requestId, actorSlackUserId);
+    const request = result.request ? await getRequest(requestId) : null;
+    if (request) await updateCurrentSlackModal(payload, request);
   }
 }
 
@@ -689,7 +708,7 @@ async function renderChannels(res: ServerResponse, notice: string, selectedChann
 }
 
 async function renderSettings(res: ServerResponse, notice: string) {
-  const openAi = await getOpenAiSettingsStatus();
+  const [openAi, splititAgent] = await Promise.all([getOpenAiSettingsStatus(), getSplititAgentSettingsStatus()]);
 
   sendHtml(
     res,
@@ -727,10 +746,29 @@ async function renderSettings(res: ServerResponse, notice: string) {
           </form>
         </div>
         <div class="panel settings-note">
-          <h2>Roles moved to channels</h2>
-          <p class="muted">Use the Channels page to set a member as CSM, sales rep, admin, or requester for that channel only.</p>
-          <a class="button-link" href="/dashboard/channels">Manage channel roles</a>
+          <div class="panel-head">
+            <h2>Splitit agent</h2>
+            <span class="pill ${splititAgent.configured ? "ok" : ""}">${splititAgent.configured ? `Configured via ${splititAgent.source}` : "Not configured"}</span>
+          </div>
+          <form class="stack" method="post" action="/dashboard/settings/splitit-agent">
+            <label>Executor webhook URL
+              <input name="splititWebhookUrl" placeholder="https://..." />
+            </label>
+            <label>Webhook secret
+              <input name="splititWebhookSecret" type="password" placeholder="Leave blank to keep current secret" />
+            </label>
+            <label class="check-row">
+              <input name="clearSplititWebhookSecret" type="checkbox" />
+              <span>Clear dashboard-saved secret</span>
+            </label>
+            <button type="submit">Save Splitit agent</button>
+          </form>
         </div>
+      </section>
+      <section class="panel settings-note">
+        <h2>Roles moved to channels</h2>
+        <p class="muted">Use the Channels page to set a member as CSM, sales rep, admin, or requester for that channel only.</p>
+        <a class="button-link" href="/dashboard/channels">Manage channel roles</a>
       </section>
       `
     )

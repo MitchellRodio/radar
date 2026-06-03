@@ -1,4 +1,4 @@
-import { InternalNote, Request, RequestType, RequestUpdate, User, Channel } from "@prisma/client";
+import { InternalNote, Request, RequestType, RequestUpdate, User, Channel, SplititAutomationJob } from "@prisma/client";
 import { formatDate } from "../lib/dates";
 import { statusLabel, threadLink, typeLabel } from "./format";
 
@@ -8,6 +8,7 @@ type RequestWithRelations = Request & {
   channel?: Channel;
   notes?: InternalNote[];
   updates?: RequestUpdate[];
+  splititAutomationJob?: SplititAutomationJob | null;
 };
 
 export function requestListBlocks(requests: RequestWithRelations[], heading: string) {
@@ -73,6 +74,7 @@ export function requestDetailBlocks(request: RequestWithRelations) {
     ),
     section(`*Extracted fields*\n${escapeMrkdwn(formatExtractedFields(request.extractedFields))}`),
     divider(),
+    section(`*Splitit agent*\n${splititAutomationText(request)}`),
     section(`*Internal notes*\n${notes}`),
     actions([
       button("Set Submitted", "request_set_submitted", `${request.id}:SUBMITTED`),
@@ -90,10 +92,30 @@ export function requestDetailBlocks(request: RequestWithRelations) {
       button("Request Info", "request_needs_info_open", String(request.id)),
       button("Notify requester", "request_notify_requester", String(request.id))
     ]),
+    ...(request.type === "SPLITIT_WHITELIST"
+      ? [
+          actions([
+            button("Queue Splitit agent", "request_splitit_agent_queue", String(request.id), "primary")
+          ])
+        ]
+      : []),
     actions([
       button("Close View", "request_close_view", String(request.id), "danger")
     ])
   ];
+}
+
+function splititAutomationText(request: RequestWithRelations) {
+  if (request.type !== "SPLITIT_WHITELIST") return "Not applicable.";
+  const job = request.splititAutomationJob;
+  if (!job) return "Not queued yet.";
+  return (
+    `*Status:* ${job.status.toLowerCase().replace(/_/g, " ")}\n` +
+    `*Step:* ${job.step.toLowerCase().replace(/_/g, " ")}\n` +
+    `*Target:* ${escapeMrkdwn(job.targetEmail)}\n` +
+    `*Last response:* ${escapeMrkdwn(job.lastResponse ?? "None")}\n` +
+    `*Error:* ${escapeMrkdwn(job.error ?? "None")}`
+  );
 }
 
 export function requestDetailModal(request: RequestWithRelations) {

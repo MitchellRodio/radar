@@ -24,6 +24,7 @@ import {
   setStatus,
   updateRequesterMessageReference
 } from "../services/requestService";
+import { queueSplititAutomation } from "../services/splititAutomationService";
 
 export function registerActions(app: App) {
   app.action("request_view", async ({ ack, body, client, action }: any) => {
@@ -95,6 +96,20 @@ export function registerActions(app: App) {
   app.action("request_needs_info_open", async ({ ack, body, client, action }: any) => {
     await ack();
     await openInput(client, body.trigger_id, `request_needs_info:${action.value}`, "Need info", "Message to requester", "", true);
+  });
+
+  app.action("request_splitit_agent_queue", async ({ ack, body, client, action }: any) => {
+    await ack();
+    const requestId = parseRequestId(action.value);
+    const actorSlackUserId = body.user.id;
+    if (!requestId || !(await canManageRequest(actorSlackUserId, requestId))) return;
+
+    const result = await queueSplititAutomation(client, requestId, actorSlackUserId);
+    const refreshedRequest = result.request ? await getRequest(requestId) : null;
+    if (refreshedRequest) await updateCurrentModal(client, body, refreshedRequest);
+    if (result.error) {
+      await notifyActionFailure(client, actorSlackUserId, result.error);
+    }
   });
 
   app.action("request_close_view", async ({ ack }: any) => {

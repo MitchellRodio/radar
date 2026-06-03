@@ -9,6 +9,7 @@ const includeRelations = {
   requester: true,
   owner: true,
   channel: true,
+  splititAutomationJob: true,
   notes: { orderBy: { createdAt: "desc" as const } },
   updates: { orderBy: { createdAt: "desc" as const }, take: 10 }
 };

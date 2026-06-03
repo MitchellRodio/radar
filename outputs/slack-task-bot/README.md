@@ -288,6 +288,48 @@ The dashboard currently supports:
 - Viewing all known channels
 - Assigning channel ownership from each channel's synced member list
 - Uploading an OpenAI API key from the dashboard
+- Configuring the Splitit agent executor webhook
 - Assigning channel-scoped member roles: `ADMIN`, `CSM`, `SALES_REP`, `REQUESTER`
 - Viewing basic open/total request counts per channel
 - Viewing immediate request counts by status, request type, channel, and recent activity
+
+## Splitit Whitelist Agent
+
+Splitit whitelist requests include a `Queue Splitit agent` button in the request detail view.
+
+The first version is intentionally controlled:
+
+- The CSM must click the button to approve the automation.
+- The bot extracts the target customer email from the request.
+- The worker queues a `SplititAutomationJob`.
+- The script sent to the executor is:
+  - `Mitchell Rodio`
+  - `Merchant`
+  - `Whop.com mitchell.rodio@whop.com`
+  - `Please whitelist, I understand the risks <customer email>`
+- The worker updates the request status as queued, waiting on Splitit, blocked, or done.
+
+To connect the real Splitit chat automation, set `SPLITIT_AGENT_WEBHOOK_URL` in Render or in dashboard settings. The bot will POST:
+
+```json
+{
+  "jobId": "job_id",
+  "requestId": 123,
+  "targetEmail": "customer@example.com",
+  "messages": ["Mitchell Rodio", "Merchant", "Whop.com mitchell.rodio@whop.com", "Please whitelist, I understand the risks customer@example.com"]
+}
+```
+
+The executor should return:
+
+```json
+{ "status": "waiting", "response": "Submitted to Splitit." }
+```
+
+or:
+
+```json
+{ "status": "done", "response": "Whitelisted successfully." }
+```
+
+If no executor webhook is configured, the job blocks cleanly and DMs the owner with the exact script that is ready to send.

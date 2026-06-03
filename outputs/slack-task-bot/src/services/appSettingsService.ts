@@ -3,6 +3,8 @@ import { prisma } from "../lib/prisma";
 
 const OPENAI_API_KEY = "OPENAI_API_KEY";
 const OPENAI_MODEL = "OPENAI_MODEL";
+const SPLITIT_AGENT_WEBHOOK_URL = "SPLITIT_AGENT_WEBHOOK_URL";
+const SPLITIT_AGENT_WEBHOOK_SECRET = "SPLITIT_AGENT_WEBHOOK_SECRET";
 
 export async function getOpenAiSettings() {
   const settings = await prisma.appSetting.findMany({
@@ -35,6 +37,39 @@ export async function getOpenAiSettingsStatus() {
   return {
     configured: Boolean(settings.apiKey),
     model: settings.model,
+    source: settings.source
+  };
+}
+
+export async function getSplititAgentSettings() {
+  const settings = await prisma.appSetting.findMany({
+    where: { key: { in: [SPLITIT_AGENT_WEBHOOK_URL, SPLITIT_AGENT_WEBHOOK_SECRET] } }
+  });
+  const values = Object.fromEntries(settings.map((setting) => [setting.key, setting.value]));
+
+  return {
+    webhookUrl: values[SPLITIT_AGENT_WEBHOOK_URL] || config.SPLITIT_AGENT_WEBHOOK_URL,
+    webhookSecret: values[SPLITIT_AGENT_WEBHOOK_SECRET] || config.SPLITIT_AGENT_WEBHOOK_SECRET,
+    source: values[SPLITIT_AGENT_WEBHOOK_URL] ? "dashboard" : config.SPLITIT_AGENT_WEBHOOK_URL ? "environment" : "missing"
+  };
+}
+
+export async function saveSplititAgentSettings(input: { webhookUrl?: string; webhookSecret?: string; clearWebhookSecret?: boolean }) {
+  if (input.webhookUrl?.trim()) {
+    await upsertSetting(SPLITIT_AGENT_WEBHOOK_URL, input.webhookUrl.trim());
+  }
+
+  if (input.clearWebhookSecret) {
+    await prisma.appSetting.deleteMany({ where: { key: SPLITIT_AGENT_WEBHOOK_SECRET } });
+  } else if (input.webhookSecret?.trim()) {
+    await upsertSetting(SPLITIT_AGENT_WEBHOOK_SECRET, input.webhookSecret.trim());
+  }
+}
+
+export async function getSplititAgentSettingsStatus() {
+  const settings = await getSplititAgentSettings();
+  return {
+    configured: Boolean(settings.webhookUrl),
     source: settings.source
   };
 }

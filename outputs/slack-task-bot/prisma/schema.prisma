@@ -34,6 +34,7 @@ enum RequestUpdateKind {
   NOTE_ADDED
   REASSIGNED
   REQUESTER_NOTIFIED
+  AUTOMATION_UPDATED
 }
 
 enum UserRole {
@@ -41,6 +42,26 @@ enum UserRole {
   CSM
   SALES_REP
   REQUESTER
+}
+
+enum SplititAutomationStatus {
+  QUEUED
+  RUNNING
+  WAITING_ON_SPLITIT
+  DONE
+  BLOCKED
+  FAILED
+}
+
+enum SplititAutomationStep {
+  QUEUED
+  SENT_NAME
+  SENT_ROLE
+  SENT_STORE_AND_EMAIL
+  SENT_WHITELIST_REQUEST
+  WAITING_FOR_REPLY
+  COMPLETED
+  BLOCKED
 }
 
 model User {
@@ -137,10 +158,38 @@ model Request {
   channel   Channel @relation(fields: [channelId], references: [slackChannelId])
   notes     InternalNote[]
   updates   RequestUpdate[]
+  splititAutomationJob SplititAutomationJob?
 
   @@index([ownerSlackUserId, status])
   @@index([channelId])
   @@index([dueDate])
+}
+
+model SplititAutomationJob {
+  id                    String                   @id @default(cuid())
+  requestId             Int                      @unique
+  targetEmail           String
+  csmName               String                   @default("Mitchell Rodio")
+  merchantRole          String                   @default("Merchant")
+  storeName             String                   @default("Whop.com")
+  merchantEmail         String                   @default("mitchell.rodio@whop.com")
+  riskAcknowledgement   String                   @default("Please whitelist, I understand the risks")
+  status                SplititAutomationStatus  @default(QUEUED)
+  step                  SplititAutomationStep    @default(QUEUED)
+  approvedBySlackUserId String?
+  lastMessage           String?
+  lastResponse          String?
+  error                 String?
+  attempts              Int                      @default(0)
+  nextRunAt             DateTime                 @default(now())
+  startedAt             DateTime?
+  completedAt           DateTime?
+  createdAt             DateTime                 @default(now())
+  updatedAt             DateTime                 @updatedAt
+
+  request Request @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextRunAt])
 }
 
 model InternalNote {
