@@ -6,10 +6,10 @@ export async function isAdmin(slackUserId: string): Promise<boolean> {
 
   const user = await prisma.user.findUnique({
     where: { slackUserId },
-    select: { isAdmin: true }
+    select: { isAdmin: true, role: true }
   });
 
-  return Boolean(user?.isAdmin);
+  return Boolean(user?.isAdmin || user?.role === "ADMIN");
 }
 
 export async function canManageRequest(slackUserId: string, requestId: number): Promise<boolean> {
@@ -17,8 +17,11 @@ export async function canManageRequest(slackUserId: string, requestId: number): 
 
   const request = await prisma.request.findUnique({
     where: { id: requestId },
-    select: { ownerSlackUserId: true }
+    select: {
+      ownerSlackUserId: true,
+      owner: { select: { role: true, isAdmin: true } }
+    }
   });
 
-  return request?.ownerSlackUserId === slackUserId;
+  return Boolean(request && request.ownerSlackUserId === slackUserId && (request.owner.role === "CSM" || request.owner.role === "ADMIN" || request.owner.isAdmin));
 }

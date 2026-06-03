@@ -1,12 +1,13 @@
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { createHmac, timingSafeEqual } from "crypto";
 import { WebClient } from "@slack/web-api";
-import type { RequestStatus, RequestType } from "@prisma/client";
+import type { RequestStatus, RequestType, UserRole } from "@prisma/client";
 import { config } from "../lib/config";
 import { parseDueDate } from "../lib/dates";
 import { logger } from "../lib/logger";
 import { canManageRequest, isAdmin } from "../lib/permissions";
 import { prisma } from "../lib/prisma";
+import { getOpenAiSettingsStatus, saveOpenAiSettings } from "../services/appSettingsService";
 import { mapChannelOwner } from "../services/channelOwnerService";
 import {
   addInternalNote,
@@ -23,7 +24,7 @@ import {
   setStatus,
   updateRequesterMessageReference
 } from "../services/requestService";
-import { ensureChannel, ensureUser } from "../services/userService";
+import { ensureChannel, ensureUser, setUserRole } from "../services/userService";
 import { helpBlocks, inputModal, requestCreateModal, requestDetailModal, requestListBlocks } from "../slack/blocks";
 import { statusLabel, typeLabel } from "../slack/format";
 import {
@@ -42,13 +43,15 @@ type DashboardChannel = {
   name: string | null;
   companyName: string | null;
   ownerSlackUserId: string | null;
+  members: DashboardUser[];
   openRequests: number;
   totalRequests: number;
 };
 
-type DashboardCsm = {
+type DashboardUser = {
   slackUserId: string;
   name: string | null;
+  role: UserRole;
 };
 
 export function startDashboardServer(port: number) {
@@ -114,6 +117,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/dashboard/settings") {
+    await renderSettings(res, url.searchParams.get("notice") ?? "");
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/dashboard/sync") {
     await syncSlackChannels();
     redirect(res, "/dashboard/channels?notice=Channels synced from Slack");
@@ -124,8 +132,28 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     const body = await readForm(req);
     const slackUserId = normalizeSlackUserId(body.get("slackUserId") ?? "");
     const name = (body.get("name") ?? "").trim() || (await fetchSlackUserName(slackUserId)) || undefined;
-    if (slackUserId) await ensureUser(slackUserId, name);
+    if (slackUserId) await ensureUser(slackUserId, name, false, "CSM");
     redirect(res, "/dashboard/channels?notice=CSM added");
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/dashboard/settings/openai") {
+    const body = await readForm(req);
+    await saveOpenAiSettings({
+      apiKey: body.get("openaiApiKey")?.toString(),
+      model: body.get("openaiModel")?.toString(),
+      clearApiKey: body.get("clearOpenAiKey") === "on"
+    });
+    redirect(res, "/dashboard/settings?notice=OpenAI settings updated");
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/dashboard/users/role") {
+    const body = await readForm(req);
+    const slackUserId = normalizeSlackUserId(body.get("slackUserId") ?? "");
+    const role = normalizeUserRole(body.get("role") ?? "");
+    if (slackUserId && role) await setUserRole(slackUserId, role, await fetchSlackUserName(slackUserId) ?? undefined);
+    redirect(res, "/dashboard/settings?notice=User role updated");
     return;
   }
 
@@ -576,7 +604,7 @@ async function renderMetrics(res: ServerResponse, notice: string) {
 }
 
 async function renderChannels(res: ServerResponse, notice: string) {
-  const [channels, csms] = await Promise.all([loadChannels(), loadCsms()]);
+  const [channels, users] = await Promise.all([loadChannels(), loadUsers()]);
 
   sendHtml(
     res,
@@ -587,9 +615,9 @@ async function renderChannels(res: ServerResponse, notice: string) {
       ${nav("channels")}
       <section class="hero">
         <div>
-          <p class="eyebrow">Whop CSM Slack bot</p>
+          <p class="eyebrow">Workspace map</p>
           <h1>Channel ownership</h1>
-          <p class="muted">Manage the channels the bot knows about, whitelist CSM Slack IDs, and assign each channel to a CSM.</p>
+          <p class="muted">Sync Slack channels, see who is inside each channel, and assign a CSM owner from the channel member list.</p>
         </div>
         <form method="post" action="/dashboard/sync">
           <button type="submit">Sync Slack channels</button>
@@ -615,8 +643,8 @@ async function renderChannels(res: ServerResponse, notice: string) {
             <span class="muted">channels</span>
           </div>
           <div>
-            <span class="stat">${csms.length}</span>
-            <span class="muted">CSMs</span>
+            <span class="stat">${users.filter((user) => user.role === "CSM" || user.role === "ADMIN").length}</span>
+            <span class="muted">CSMs/admins</span>
           </div>
           <div>
             <span class="stat">${channels.reduce((sum, channel) => sum + channel.openRequests, 0)}</span>
@@ -636,13 +664,14 @@ async function renderChannels(res: ServerResponse, notice: string) {
                 <th>Channel</th>
                 <th>Slack ID</th>
                 <th>Owner</th>
+                <th>Members</th>
                 <th>Open</th>
                 <th>Total</th>
                 <th>Assign</th>
               </tr>
             </thead>
             <tbody>
-              ${channels.map((channel) => channelRow(channel, csms)).join("")}
+              ${channels.map((channel) => channelRow(channel, users)).join("")}
             </tbody>
           </table>
         </div>
@@ -652,11 +681,90 @@ async function renderChannels(res: ServerResponse, notice: string) {
   );
 }
 
-function nav(active: "metrics" | "channels") {
+async function renderSettings(res: ServerResponse, notice: string) {
+  const [openAi, users] = await Promise.all([getOpenAiSettingsStatus(), loadUsers()]);
+
+  sendHtml(
+    res,
+    200,
+    page(
+      "Radar Settings",
+      `
+      ${nav("settings")}
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Controls</p>
+          <h1>Settings</h1>
+          <p class="muted">Manage AI enrichment and assign lightweight roles for people in customer channels.</p>
+        </div>
+      </section>
+      ${notice ? `<div class="notice">${escapeHtml(notice)}</div>` : ""}
+      <section class="grid">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>OpenAI</h2>
+            <span class="pill ${openAi.configured ? "ok" : ""}">${openAi.configured ? `Configured via ${openAi.source}` : "Not configured"}</span>
+          </div>
+          <form class="stack" method="post" action="/dashboard/settings/openai">
+            <label>API key
+              <input name="openaiApiKey" type="password" placeholder="${openAi.configured ? "Leave blank to keep current key" : "sk-..."}" />
+            </label>
+            <label>Model
+              <input name="openaiModel" value="${escapeHtml(openAi.model)}" />
+            </label>
+            <label class="check-row">
+              <input name="clearOpenAiKey" type="checkbox" />
+              <span>Clear dashboard-saved key</span>
+            </label>
+            <button type="submit">Save AI settings</button>
+          </form>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Add person</h2>
+            <span class="muted">Create or update role</span>
+          </div>
+          <form class="stack" method="post" action="/dashboard/users/role">
+            <label>Slack user ID
+              <input name="slackUserId" placeholder="U123ABC" required />
+            </label>
+            <label>Role
+              ${roleSelect("role", "REQUESTER")}
+            </label>
+            <button type="submit">Save role</button>
+          </form>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>People</h2>
+          <span class="muted">Roles are intentionally simple for now.</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Slack ID</th>
+                <th>Role</th>
+                <th>Update</th>
+              </tr>
+            </thead>
+            <tbody>${users.map(userRow).join("")}</tbody>
+          </table>
+        </div>
+      </section>
+      `
+    )
+  );
+}
+
+function nav(active: "metrics" | "channels" | "settings") {
   return `
     <nav class="top-nav">
       <a class="${active === "metrics" ? "active" : ""}" href="/dashboard/metrics">Metrics</a>
       <a class="${active === "channels" ? "active" : ""}" href="/dashboard/channels">Channels</a>
+      <a class="${active === "settings" ? "active" : ""}" href="/dashboard/settings">Settings</a>
     </nav>
   `;
 }
@@ -694,14 +802,16 @@ function recentRequests(requests: Awaited<ReturnType<typeof loadRequestStats>>["
   `;
 }
 
-function channelRow(channel: DashboardChannel, csms: DashboardCsm[]) {
+function channelRow(channel: DashboardChannel, users: DashboardUser[]) {
   const displayName = channel.companyName ?? channel.name ?? channel.slackChannelId;
-  const owner = csms.find((csm) => csm.slackUserId === channel.ownerSlackUserId);
+  const owner = users.find((user) => user.slackUserId === channel.ownerSlackUserId);
+  const assignable = channel.members.length ? channel.members : users.filter((user) => user.role === "CSM" || user.role === "ADMIN");
   return `
     <tr>
       <td><strong>${escapeHtml(displayName)}</strong></td>
       <td><code>${escapeHtml(channel.slackChannelId)}</code></td>
-      <td>${owner ? `${escapeHtml(csmLabel(owner))}<br /><code>${escapeHtml(owner.slackUserId)}</code>` : channel.ownerSlackUserId ? `<code>${escapeHtml(channel.ownerSlackUserId)}</code>` : `<span class="muted">Unassigned</span>`}</td>
+      <td>${owner ? `${escapeHtml(userLabel(owner))}<br /><span class="role-chip">${roleLabel(owner.role)}</span>` : channel.ownerSlackUserId ? `<code>${escapeHtml(channel.ownerSlackUserId)}</code>` : `<span class="muted">Unassigned</span>`}</td>
+      <td>${memberPreview(channel.members)}</td>
       <td>${channel.openRequests}</td>
       <td>${channel.totalRequests}</td>
       <td>
@@ -709,7 +819,7 @@ function channelRow(channel: DashboardChannel, csms: DashboardCsm[]) {
           <input type="hidden" name="channelId" value="${escapeHtml(channel.slackChannelId)}" />
           <select name="ownerSlackUserId" required>
             <option value="">Select CSM</option>
-            ${csms.map((csm) => `<option value="${escapeHtml(csm.slackUserId)}" ${csm.slackUserId === channel.ownerSlackUserId ? "selected" : ""}>${escapeHtml(csmLabel(csm))}</option>`).join("")}
+            ${assignable.map((user) => `<option value="${escapeHtml(user.slackUserId)}" ${user.slackUserId === channel.ownerSlackUserId ? "selected" : ""}>${escapeHtml(userLabel(user))}</option>`).join("")}
           </select>
           <button type="submit">Save</button>
         </form>
@@ -718,13 +828,52 @@ function channelRow(channel: DashboardChannel, csms: DashboardCsm[]) {
   `;
 }
 
-function csmLabel(csm: DashboardCsm) {
-  return csm.name ? `${csm.name} (${csm.slackUserId})` : csm.slackUserId;
+function userRow(user: DashboardUser) {
+  return `
+    <tr>
+      <td><strong>${escapeHtml(user.name ?? "Unknown")}</strong></td>
+      <td><code>${escapeHtml(user.slackUserId)}</code></td>
+      <td><span class="role-chip">${roleLabel(user.role)}</span></td>
+      <td>
+        <form class="inline" method="post" action="/dashboard/users/role">
+          <input type="hidden" name="slackUserId" value="${escapeHtml(user.slackUserId)}" />
+          ${roleSelect("role", user.role)}
+          <button type="submit">Save</button>
+        </form>
+      </td>
+    </tr>
+  `;
+}
+
+function userLabel(user: DashboardUser) {
+  return user.name ? `${user.name} (${user.slackUserId})` : user.slackUserId;
+}
+
+function memberPreview(members: DashboardUser[]) {
+  if (!members.length) return `<span class="muted">Not synced</span>`;
+  const preview = members.slice(0, 3).map((member) => escapeHtml(member.name ?? member.slackUserId)).join(", ");
+  const extra = members.length > 3 ? ` +${members.length - 3}` : "";
+  return `${preview}${extra}<br /><span class="muted">${members.length} member${members.length === 1 ? "" : "s"}</span>`;
+}
+
+function roleSelect(name: string, selected: UserRole) {
+  const roles: UserRole[] = ["ADMIN", "CSM", "SALES_REP", "REQUESTER"];
+  return `<select name="${name}" required>${roles.map((role) => `<option value="${role}" ${role === selected ? "selected" : ""}>${roleLabel(role)}</option>`).join("")}</select>`;
+}
+
+function roleLabel(role: UserRole) {
+  return role.toLowerCase().replace(/_/g, " ");
 }
 
 async function loadChannels(): Promise<DashboardChannel[]> {
   const channels = await prisma.channel.findMany({
-    include: { ownerMapping: true },
+    include: {
+      ownerMapping: true,
+      members: {
+        include: { user: true },
+        orderBy: { slackUserId: "asc" }
+      }
+    },
     orderBy: [{ companyName: "asc" }, { name: "asc" }, { slackChannelId: "asc" }]
   });
 
@@ -740,6 +889,11 @@ async function loadChannels(): Promise<DashboardChannel[]> {
         name: channel.name,
         companyName: channel.companyName,
         ownerSlackUserId: channel.ownerMapping?.ownerSlackUserId ?? null,
+        members: channel.members.map((member) => ({
+          slackUserId: member.user.slackUserId,
+          name: member.user.name,
+          role: member.user.role
+        })),
         openRequests,
         totalRequests
       };
@@ -749,8 +903,16 @@ async function loadChannels(): Promise<DashboardChannel[]> {
 
 async function loadCsms() {
   return prisma.user.findMany({
+    where: { OR: [{ role: "CSM" }, { role: "ADMIN" }, { isAdmin: true }] },
     orderBy: [{ name: "asc" }, { slackUserId: "asc" }],
-    select: { slackUserId: true, name: true }
+    select: { slackUserId: true, name: true, role: true }
+  });
+}
+
+async function loadUsers() {
+  return prisma.user.findMany({
+    orderBy: [{ role: "asc" }, { name: "asc" }, { slackUserId: "asc" }],
+    select: { slackUserId: true, name: true, role: true }
   });
 }
 
@@ -797,10 +959,44 @@ async function syncSlackChannels() {
     for (const channel of response.channels ?? []) {
       if (!channel.id) continue;
       await ensureChannel(channel.id, channel.name ?? undefined);
+      await syncSlackChannelMembers(channel.id);
     }
 
     cursor = response.response_metadata?.next_cursor || undefined;
   } while (cursor);
+}
+
+async function syncSlackChannelMembers(slackChannelId: string) {
+  const memberIds: string[] = [];
+  let cursor: string | undefined;
+
+  try {
+    do {
+      const response = await slack.conversations.members({
+        channel: slackChannelId,
+        limit: 200,
+        cursor
+      });
+
+      memberIds.push(...(response.members ?? []));
+      cursor = response.response_metadata?.next_cursor || undefined;
+    } while (cursor);
+  } catch (error) {
+    logger.warn({ error, slackChannelId }, "Could not sync Slack channel members");
+    return;
+  }
+
+  await prisma.channelMember.deleteMany({ where: { slackChannelId } });
+
+  for (const slackUserId of memberIds) {
+    if (!slackUserId) continue;
+    await ensureNamedUser(slackUserId);
+    await prisma.channelMember.upsert({
+      where: { slackChannelId_slackUserId: { slackChannelId, slackUserId } },
+      update: {},
+      create: { slackChannelId, slackUserId }
+    });
+  }
 }
 
 async function ensureNamedUser(slackUserId: string) {
@@ -903,6 +1099,19 @@ function normalizeSlackUserId(value: string) {
   return value.trim().match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/)?.[1] ?? value.trim();
 }
 
+function normalizeUserRole(value: string): UserRole | null {
+  const role = value.trim().toUpperCase();
+  switch (role) {
+    case "ADMIN":
+    case "CSM":
+    case "SALES_REP":
+    case "REQUESTER":
+      return role;
+    default:
+      return null;
+  }
+}
+
 function isStatusActionId(actionId: string) {
   return actionId === "request_set_submitted" || actionId === "request_set_in_progress" || actionId === "request_set_done";
 }
@@ -949,48 +1158,55 @@ function escapeHtml(value: string) {
 
 function css() {
   return `
-    :root { color-scheme: light; --bg:#f6f7f9; --text:#19202a; --muted:#667085; --line:#d7dde6; --panel:#ffffff; --accent:#256f5c; --accent-strong:#174d40; }
+    :root { color-scheme: light; --bg:#f8fafd; --text:#202124; --muted:#5f6368; --line:#dadce0; --panel:#ffffff; --blue:#1a73e8; --blue-dark:#185abc; --green:#188038; --yellow:#fbbc04; --red:#d93025; }
     * { box-sizing: border-box; }
     body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
-    main { width: min(1180px, calc(100vw - 32px)); margin: 0 auto; padding: 32px 0 56px; }
-    .hero { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding: 10px 0 24px; }
-    .top-nav { display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid var(--line); }
-    .top-nav a { color: var(--muted); text-decoration: none; padding: 10px 12px; border-bottom: 2px solid transparent; font-weight: 700; }
-    .top-nav a.active { color: var(--accent); border-bottom-color: var(--accent); }
-    .button-link { display: inline-flex; align-items: center; min-height: 38px; border-radius: 8px; padding: 8px 13px; background: var(--accent); color: white; text-decoration: none; font-weight: 700; }
-    .eyebrow { color: var(--accent); font-weight: 700; margin: 0 0 8px; text-transform: uppercase; font-size: 12px; letter-spacing: 0; }
+    main { width: min(1240px, calc(100vw - 32px)); margin: 0 auto; padding: 28px 0 56px; }
+    .hero { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding: 4px 0 22px; }
+    .top-nav { display: flex; gap: 4px; margin-bottom: 22px; border-bottom: 1px solid var(--line); }
+    .top-nav a { color: var(--muted); text-decoration: none; padding: 12px 14px; border-bottom: 3px solid transparent; font-weight: 600; border-radius: 8px 8px 0 0; }
+    .top-nav a:hover { background: #eef4ff; color: var(--blue-dark); }
+    .top-nav a.active { color: var(--blue); border-bottom-color: var(--blue); }
+    .button-link { display: inline-flex; align-items: center; min-height: 38px; border-radius: 8px; padding: 8px 14px; background: var(--blue); color: white; text-decoration: none; font-weight: 700; }
+    .eyebrow { color: var(--blue); font-weight: 700; margin: 0 0 8px; text-transform: uppercase; font-size: 12px; letter-spacing: 0; }
     h1, h2 { margin: 0; letter-spacing: 0; }
-    h1 { font-size: 34px; line-height: 1.1; }
+    h1 { font-size: 34px; line-height: 1.12; font-weight: 750; }
     h2 { font-size: 18px; }
     .muted { color: var(--muted); }
-    .notice { background: #e8f4ef; border: 1px solid #b8dccf; padding: 12px 14px; border-radius: 8px; margin-bottom: 16px; color: var(--accent-strong); }
+    .notice { background: #e8f0fe; border: 1px solid #d2e3fc; padding: 12px 14px; border-radius: 8px; margin-bottom: 16px; color: #174ea6; }
     .grid { display: grid; grid-template-columns: 360px 1fr; gap: 16px; margin-bottom: 16px; }
-    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px; box-shadow: 0 1px 2px rgba(16, 24, 40, .04); }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px; box-shadow: 0 1px 2px rgba(60, 64, 67, .12); }
     .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
     .stack { display: grid; gap: 12px; margin-top: 14px; }
     .inline { display: grid; grid-template-columns: minmax(150px, 1fr) auto; gap: 8px; align-items: center; }
+    .check-row { display: flex; grid-template-columns: none; align-items: center; gap: 8px; }
+    .check-row input { width: auto; min-height: auto; }
     label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
-    input, select { width: 100%; min-height: 38px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: #fff; color: var(--text); font: inherit; }
-    button { min-height: 38px; border: 0; border-radius: 8px; padding: 8px 13px; background: var(--accent); color: white; font-weight: 700; cursor: pointer; }
-    button:hover { background: var(--accent-strong); }
+    input, select { width: 100%; min-height: 38px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: #fff; color: var(--text); font: inherit; outline-color: var(--blue); }
+    button { min-height: 38px; border: 0; border-radius: 8px; padding: 8px 14px; background: var(--blue); color: white; font-weight: 700; cursor: pointer; box-shadow: 0 1px 1px rgba(60, 64, 67, .18); }
+    button:hover { background: var(--blue-dark); }
     .stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; align-items: center; }
     .stat-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 16px; margin-bottom: 16px; }
-    .stat-card { min-height: 112px; display: flex; flex-direction: column; justify-content: center; }
-    .stat { display: block; font-size: 32px; font-weight: 800; margin-bottom: 4px; }
+    .stat-card { min-height: 106px; display: flex; flex-direction: column; justify-content: center; }
+    .stat { display: block; font-size: 32px; font-weight: 750; margin-bottom: 4px; }
     .metric-list, .recent-list { display: grid; gap: 12px; }
     .metric-row { display: grid; gap: 7px; }
     .metric-label { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; }
-    .bar { height: 8px; border-radius: 999px; background: #edf1f5; overflow: hidden; }
-    .bar span { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+    .bar { height: 8px; border-radius: 999px; background: #edf2fa; overflow: hidden; }
+    .bar span { display: block; height: 100%; border-radius: inherit; background: var(--blue); }
     .recent-item { display: grid; gap: 4px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
     .recent-item:last-child { border-bottom: 0; padding-bottom: 0; }
     .recent-item span { color: var(--muted); font-size: 13px; }
     .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
-    table { width: 100%; border-collapse: collapse; min-width: 860px; }
+    table { width: 100%; border-collapse: collapse; min-width: 980px; }
     th, td { padding: 12px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
-    th { background: #f9fafb; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0; }
+    th { background: #f8fafd; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0; font-weight: 700; }
+    tr:hover td { background: #fbfdff; }
     tr:last-child td { border-bottom: 0; }
-    code { background: #eef1f5; border-radius: 6px; padding: 2px 6px; font-size: 12px; }
+    code { background: #f1f3f4; border-radius: 6px; padding: 2px 6px; font-size: 12px; color: #3c4043; }
+    .pill, .role-chip { display: inline-flex; align-items: center; border-radius: 999px; padding: 3px 9px; background: #f1f3f4; color: #3c4043; font-size: 12px; font-weight: 700; text-transform: capitalize; }
+    .pill.ok { background: #e6f4ea; color: var(--green); }
+    .role-chip { background: #e8f0fe; color: #174ea6; }
     .login-panel { max-width: 440px; margin: 15vh auto 0; }
     .login { display: grid; gap: 14px; margin-top: 18px; }
     @media (max-width: 1000px) { .stat-grid { grid-template-columns: repeat(3, 1fr); } }

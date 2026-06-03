@@ -1,6 +1,6 @@
 import { Prisma, RequestType } from "@prisma/client";
-import { config } from "../lib/config";
 import { logger } from "../lib/logger";
+import { getOpenAiSettings } from "./appSettingsService";
 import { analyzeRequestMetadata, detectType } from "./requestParser";
 
 type AiRequestMetadata = {
@@ -37,17 +37,18 @@ export async function analyzeRequestWithAi(input: {
     ...analyzeRequestMetadata(text, fallbackType, input.dueDate)
   };
 
-  if (!config.OPENAI_API_KEY) return fallback;
+  const settings = await getOpenAiSettings();
+  if (!settings.apiKey) return fallback;
 
   try {
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${config.OPENAI_API_KEY}`,
+        Authorization: `Bearer ${settings.apiKey}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: config.OPENAI_MODEL,
+        model: settings.model,
         instructions:
           "You classify customer Slack requests for a CSM task bot. " +
           "Use requestType only as a broad grouping. If a request does not clearly fit, use OTHER. " +

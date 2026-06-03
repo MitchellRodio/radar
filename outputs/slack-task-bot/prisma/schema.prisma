@@ -36,11 +36,19 @@ enum RequestUpdateKind {
   REQUESTER_NOTIFIED
 }
 
+enum UserRole {
+  ADMIN
+  CSM
+  SALES_REP
+  REQUESTER
+}
+
 model User {
   id          String   @id @default(cuid())
   slackUserId String   @unique
   name        String?
   isAdmin     Boolean  @default(false)
+  role        UserRole @default(REQUESTER)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -49,6 +57,7 @@ model User {
   internalNotes    InternalNote[]
   requestUpdates   RequestUpdate[]
   channelMappings  ChannelOwnerMapping[]
+  channelMemberships ChannelMember[]
 }
 
 model Channel {
@@ -61,6 +70,28 @@ model Channel {
 
   requests Request[]
   ownerMapping ChannelOwnerMapping?
+  members ChannelMember[]
+}
+
+model ChannelMember {
+  id             String   @id @default(cuid())
+  slackChannelId String
+  slackUserId    String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  channel Channel @relation(fields: [slackChannelId], references: [slackChannelId], onDelete: Cascade)
+  user    User    @relation(fields: [slackUserId], references: [slackUserId], onDelete: Cascade)
+
+  @@unique([slackChannelId, slackUserId])
+  @@index([slackUserId])
+}
+
+model AppSetting {
+  key       String   @id
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model ChannelOwnerMapping {
