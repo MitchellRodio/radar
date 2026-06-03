@@ -24,7 +24,7 @@ import {
   setStatus,
   updateRequesterMessageReference
 } from "../services/requestService";
-import { ensureChannel, ensureUser, setUserRole } from "../services/userService";
+import { ensureChannel, ensureUser } from "../services/userService";
 import { helpBlocks, inputModal, requestCreateModal, requestDetailModal, requestListBlocks } from "../slack/blocks";
 import { statusLabel, typeLabel } from "../slack/format";
 import {
@@ -43,7 +43,7 @@ type DashboardChannel = {
   name: string | null;
   companyName: string | null;
   ownerSlackUserId: string | null;
-  members: DashboardUser[];
+  members: DashboardChannelMember[];
   openRequests: number;
   totalRequests: number;
 };
@@ -52,6 +52,10 @@ type DashboardUser = {
   slackUserId: string;
   name: string | null;
   role: UserRole;
+};
+
+type DashboardChannelMember = DashboardUser & {
+  channelRole: UserRole;
 };
 
 export function startDashboardServer(port: number) {
@@ -113,7 +117,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
   }
 
   if (req.method === "GET" && url.pathname === "/dashboard/channels") {
-    await renderChannels(res, url.searchParams.get("notice") ?? "");
+    await renderChannels(res, url.searchParams.get("notice") ?? "", url.searchParams.get("channel") ?? "");
     return;
   }
 
@@ -128,15 +132,6 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
-  if (req.method === "POST" && url.pathname === "/dashboard/csms") {
-    const body = await readForm(req);
-    const slackUserId = normalizeSlackUserId(body.get("slackUserId") ?? "");
-    const name = (body.get("name") ?? "").trim() || (await fetchSlackUserName(slackUserId)) || undefined;
-    if (slackUserId) await ensureUser(slackUserId, name, false, "CSM");
-    redirect(res, "/dashboard/channels?notice=CSM added");
-    return;
-  }
-
   if (req.method === "POST" && url.pathname === "/dashboard/settings/openai") {
     const body = await readForm(req);
     await saveOpenAiSettings({
@@ -148,12 +143,20 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
-  if (req.method === "POST" && url.pathname === "/dashboard/users/role") {
+  if (req.method === "POST" && url.pathname === "/dashboard/channel-member-role") {
     const body = await readForm(req);
+    const channelId = (body.get("channelId") ?? "").trim();
     const slackUserId = normalizeSlackUserId(body.get("slackUserId") ?? "");
     const role = normalizeUserRole(body.get("role") ?? "");
-    if (slackUserId && role) await setUserRole(slackUserId, role, await fetchSlackUserName(slackUserId) ?? undefined);
-    redirect(res, "/dashboard/settings?notice=User role updated");
+    if (channelId && slackUserId && role) {
+      await ensureNamedUser(slackUserId);
+      await prisma.channelMember.upsert({
+        where: { slackChannelId_slackUserId: { slackChannelId: channelId, slackUserId } },
+        update: { role },
+        create: { slackChannelId: channelId, slackUserId, role }
+      });
+    }
+    redirect(res, `/dashboard/channels?channel=${encodeURIComponent(channelId)}&notice=Channel role updated`);
     return;
   }
 
@@ -162,8 +165,15 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     const channelId = (body.get("channelId") ?? "").trim();
     const ownerSlackUserId = normalizeSlackUserId(body.get("ownerSlackUserId") ?? "");
     await ensureNamedUser(ownerSlackUserId);
-    if (channelId && ownerSlackUserId) await mapChannelOwner(channelId, ownerSlackUserId);
-    redirect(res, "/dashboard/channels?notice=Channel owner updated");
+    if (channelId && ownerSlackUserId) {
+      await mapChannelOwner(channelId, ownerSlackUserId);
+      await prisma.channelMember.upsert({
+        where: { slackChannelId_slackUserId: { slackChannelId: channelId, slackUserId: ownerSlackUserId } },
+        update: { role: "CSM" },
+        create: { slackChannelId: channelId, slackUserId: ownerSlackUserId, role: "CSM" }
+      });
+    }
+    redirect(res, `/dashboard/channels?channel=${encodeURIComponent(channelId)}&notice=Channel owner updated`);
     return;
   }
 
@@ -537,7 +547,8 @@ async function updateCurrentSlackModal(payload: any, request: any) {
 }
 
 async function renderMetrics(res: ServerResponse, notice: string) {
-  const [channels, csms, requestStats] = await Promise.all([loadChannels(), loadCsms(), loadRequestStats()]);
+  const [channels, requestStats] = await Promise.all([loadChannels(), loadRequestStats()]);
+  const channelOperators = channelOperatorCount(channels);
 
   sendHtml(
     res,
@@ -558,7 +569,7 @@ async function renderMetrics(res: ServerResponse, notice: string) {
       <section class="stat-grid">
         ${statCard("Known channels", channels.length)}
         ${statCard("Assigned channels", channels.filter((channel) => channel.ownerSlackUserId).length)}
-        ${statCard("CSMs", csms.length)}
+        ${statCard("Channel operators", channelOperators)}
         ${statCard("Open requests", requestStats.openRequests)}
         ${statCard("Done requests", requestStats.doneRequests)}
         ${statCard("Waiting on customer", requestStats.waitingOnCustomer)}
@@ -603,8 +614,15 @@ async function renderMetrics(res: ServerResponse, notice: string) {
   );
 }
 
-async function renderChannels(res: ServerResponse, notice: string) {
-  const [channels, users] = await Promise.all([loadChannels(), loadUsers()]);
+async function renderChannels(res: ServerResponse, notice: string, selectedChannelId: string) {
+  const channels = await loadChannels();
+  const selectedChannel = selectedChannelId
+    ? channels.find((channel) => channel.slackChannelId === selectedChannelId) ?? null
+    : null;
+  const channelOperators = new Set<string>();
+  channels.forEach((channel) => channel.members.forEach((member) => {
+    if (isChannelOperator(member)) channelOperators.add(member.slackUserId);
+  }));
 
   sendHtml(
     res,
@@ -617,7 +635,7 @@ async function renderChannels(res: ServerResponse, notice: string) {
         <div>
           <p class="eyebrow">Workspace map</p>
           <h1>Channel ownership</h1>
-          <p class="muted">Sync Slack channels, see who is inside each channel, and assign a CSM owner from the channel member list.</p>
+          <p class="muted">Sync Slack channels, then manage owners and roles inside the channel where those people actually work.</p>
         </div>
         <form method="post" action="/dashboard/sync">
           <button type="submit">Sync Slack channels</button>
@@ -625,26 +643,14 @@ async function renderChannels(res: ServerResponse, notice: string) {
       </section>
       ${notice ? `<div class="notice">${escapeHtml(notice)}</div>` : ""}
       <section class="grid">
-        <div class="panel">
-          <h2>Add CSM</h2>
-          <form class="stack" method="post" action="/dashboard/csms">
-            <label>Slack user ID
-              <input name="slackUserId" placeholder="U123ABC" required />
-            </label>
-            <label>Name
-              <input name="name" placeholder="Optional, auto-filled from Slack when possible" />
-            </label>
-            <button type="submit">Whitelist CSM</button>
-          </form>
-        </div>
         <div class="panel stat-row">
           <div>
             <span class="stat">${channels.length}</span>
             <span class="muted">channels</span>
           </div>
           <div>
-            <span class="stat">${users.filter((user) => user.role === "CSM" || user.role === "ADMIN").length}</span>
-            <span class="muted">CSMs/admins</span>
+            <span class="stat">${channelOperators.size}</span>
+            <span class="muted">channel operators</span>
           </div>
           <div>
             <span class="stat">${channels.reduce((sum, channel) => sum + channel.openRequests, 0)}</span>
@@ -652,10 +658,11 @@ async function renderChannels(res: ServerResponse, notice: string) {
           </div>
         </div>
       </section>
+      ${selectedChannel ? channelMemberPanel(selectedChannel) : ""}
       <section class="panel">
         <div class="panel-head">
           <h2>Channels</h2>
-          <span class="muted">Assign ownership directly from the table.</span>
+          <span class="muted">Open a channel to assign owner and member roles.</span>
         </div>
         <div class="table-wrap">
           <table>
@@ -667,11 +674,11 @@ async function renderChannels(res: ServerResponse, notice: string) {
                 <th>Members</th>
                 <th>Open</th>
                 <th>Total</th>
-                <th>Assign</th>
+                <th>Manage</th>
               </tr>
             </thead>
             <tbody>
-              ${channels.map((channel) => channelRow(channel, users)).join("")}
+              ${channels.map((channel) => channelRow(channel)).join("")}
             </tbody>
           </table>
         </div>
@@ -682,7 +689,7 @@ async function renderChannels(res: ServerResponse, notice: string) {
 }
 
 async function renderSettings(res: ServerResponse, notice: string) {
-  const [openAi, users] = await Promise.all([getOpenAiSettingsStatus(), loadUsers()]);
+  const openAi = await getOpenAiSettingsStatus();
 
   sendHtml(
     res,
@@ -695,7 +702,7 @@ async function renderSettings(res: ServerResponse, notice: string) {
         <div>
           <p class="eyebrow">Controls</p>
           <h1>Settings</h1>
-          <p class="muted">Manage AI enrichment and assign lightweight roles for people in customer channels.</p>
+          <p class="muted">Manage AI enrichment. Channel roles live in the Channels area so they stay scoped to each customer channel.</p>
         </div>
       </section>
       ${notice ? `<div class="notice">${escapeHtml(notice)}</div>` : ""}
@@ -719,39 +726,10 @@ async function renderSettings(res: ServerResponse, notice: string) {
             <button type="submit">Save AI settings</button>
           </form>
         </div>
-        <div class="panel">
-          <div class="panel-head">
-            <h2>Add person</h2>
-            <span class="muted">Create or update role</span>
-          </div>
-          <form class="stack" method="post" action="/dashboard/users/role">
-            <label>Slack user ID
-              <input name="slackUserId" placeholder="U123ABC" required />
-            </label>
-            <label>Role
-              ${roleSelect("role", "REQUESTER")}
-            </label>
-            <button type="submit">Save role</button>
-          </form>
-        </div>
-      </section>
-      <section class="panel">
-        <div class="panel-head">
-          <h2>People</h2>
-          <span class="muted">Roles are intentionally simple for now.</span>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Slack ID</th>
-                <th>Role</th>
-                <th>Update</th>
-              </tr>
-            </thead>
-            <tbody>${users.map(userRow).join("")}</tbody>
-          </table>
+        <div class="panel settings-note">
+          <h2>Roles moved to channels</h2>
+          <p class="muted">Use the Channels page to set a member as CSM, sales rep, admin, or requester for that channel only.</p>
+          <a class="button-link" href="/dashboard/channels">Manage channel roles</a>
         </div>
       </section>
       `
@@ -802,42 +780,80 @@ function recentRequests(requests: Awaited<ReturnType<typeof loadRequestStats>>["
   `;
 }
 
-function channelRow(channel: DashboardChannel, users: DashboardUser[]) {
+function channelRow(channel: DashboardChannel) {
   const displayName = channel.companyName ?? channel.name ?? channel.slackChannelId;
-  const owner = users.find((user) => user.slackUserId === channel.ownerSlackUserId);
-  const assignable = channel.members.length ? channel.members : users.filter((user) => user.role === "CSM" || user.role === "ADMIN");
+  const owner = channel.members.find((user) => user.slackUserId === channel.ownerSlackUserId);
   return `
     <tr>
       <td><strong>${escapeHtml(displayName)}</strong></td>
       <td><code>${escapeHtml(channel.slackChannelId)}</code></td>
-      <td>${owner ? `${escapeHtml(userLabel(owner))}<br /><span class="role-chip">${roleLabel(owner.role)}</span>` : channel.ownerSlackUserId ? `<code>${escapeHtml(channel.ownerSlackUserId)}</code>` : `<span class="muted">Unassigned</span>`}</td>
+      <td>${owner ? `${escapeHtml(userLabel(owner))}<br /><span class="role-chip">${roleLabel(owner.channelRole)}</span>` : channel.ownerSlackUserId ? `<code>${escapeHtml(channel.ownerSlackUserId)}</code>` : `<span class="muted">Unassigned</span>`}</td>
       <td>${memberPreview(channel.members)}</td>
       <td>${channel.openRequests}</td>
       <td>${channel.totalRequests}</td>
-      <td>
-        <form class="inline" method="post" action="/dashboard/channel-owner">
-          <input type="hidden" name="channelId" value="${escapeHtml(channel.slackChannelId)}" />
-          <select name="ownerSlackUserId" required>
-            <option value="">Select CSM</option>
-            ${assignable.map((user) => `<option value="${escapeHtml(user.slackUserId)}" ${user.slackUserId === channel.ownerSlackUserId ? "selected" : ""}>${escapeHtml(userLabel(user))}</option>`).join("")}
-          </select>
-          <button type="submit">Save</button>
-        </form>
-      </td>
+      <td><a class="button-link small" href="/dashboard/channels?channel=${encodeURIComponent(channel.slackChannelId)}">Open</a></td>
     </tr>
   `;
 }
 
-function userRow(user: DashboardUser) {
+function channelMemberPanel(channel: DashboardChannel) {
+  const displayName = channel.companyName ?? channel.name ?? channel.slackChannelId;
+  return `
+    <section class="panel focus-panel">
+      <div class="panel-head">
+        <div>
+          <h2>${escapeHtml(displayName)}</h2>
+          <span class="muted"><code>${escapeHtml(channel.slackChannelId)}</code> | ${channel.members.length} member${channel.members.length === 1 ? "" : "s"}</span>
+        </div>
+        <a class="button-link secondary" href="/dashboard/channels">Close</a>
+      </div>
+      <div class="grid">
+        <div class="panel subtle-panel">
+          <h3>Owner CSM</h3>
+          <form class="stack" method="post" action="/dashboard/channel-owner">
+            <input type="hidden" name="channelId" value="${escapeHtml(channel.slackChannelId)}" />
+            <label>Select from this channel
+              <select name="ownerSlackUserId" required>
+                <option value="">Select CSM</option>
+                ${channel.members.map((member) => `<option value="${escapeHtml(member.slackUserId)}" ${member.slackUserId === channel.ownerSlackUserId ? "selected" : ""}>${escapeHtml(userLabel(member))}</option>`).join("")}
+              </select>
+            </label>
+            <button type="submit">Save owner</button>
+          </form>
+        </div>
+        <div class="panel subtle-panel">
+          <h3>Role model</h3>
+          <p class="muted">Roles here apply only inside this channel. Use CSM/admin for people who should manage requests. Sales reps and requesters cannot update tickets.</p>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Member</th>
+              <th>Slack ID</th>
+              <th>Channel role</th>
+              <th>Update</th>
+            </tr>
+          </thead>
+          <tbody>${channel.members.map((member) => channelMemberRow(channel.slackChannelId, member)).join("")}</tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+function channelMemberRow(channelId: string, member: DashboardChannelMember) {
   return `
     <tr>
-      <td><strong>${escapeHtml(user.name ?? "Unknown")}</strong></td>
-      <td><code>${escapeHtml(user.slackUserId)}</code></td>
-      <td><span class="role-chip">${roleLabel(user.role)}</span></td>
+      <td><strong>${escapeHtml(member.name ?? "Unknown")}</strong></td>
+      <td><code>${escapeHtml(member.slackUserId)}</code></td>
+      <td><span class="role-chip">${roleLabel(member.channelRole)}</span></td>
       <td>
-        <form class="inline" method="post" action="/dashboard/users/role">
-          <input type="hidden" name="slackUserId" value="${escapeHtml(user.slackUserId)}" />
-          ${roleSelect("role", user.role)}
+        <form class="inline" method="post" action="/dashboard/channel-member-role">
+          <input type="hidden" name="channelId" value="${escapeHtml(channelId)}" />
+          <input type="hidden" name="slackUserId" value="${escapeHtml(member.slackUserId)}" />
+          ${roleSelect("role", member.channelRole)}
           <button type="submit">Save</button>
         </form>
       </td>
@@ -849,11 +865,24 @@ function userLabel(user: DashboardUser) {
   return user.name ? `${user.name} (${user.slackUserId})` : user.slackUserId;
 }
 
-function memberPreview(members: DashboardUser[]) {
+function memberPreview(members: DashboardChannelMember[]) {
   if (!members.length) return `<span class="muted">Not synced</span>`;
+  const operators = members.filter(isChannelOperator).length;
   const preview = members.slice(0, 3).map((member) => escapeHtml(member.name ?? member.slackUserId)).join(", ");
   const extra = members.length > 3 ? ` +${members.length - 3}` : "";
-  return `${preview}${extra}<br /><span class="muted">${members.length} member${members.length === 1 ? "" : "s"}</span>`;
+  return `${preview}${extra}<br /><span class="muted">${members.length} member${members.length === 1 ? "" : "s"} | ${operators} operator${operators === 1 ? "" : "s"}</span>`;
+}
+
+function channelOperatorCount(channels: DashboardChannel[]) {
+  const operators = new Set<string>();
+  channels.forEach((channel) => channel.members.forEach((member) => {
+    if (isChannelOperator(member)) operators.add(member.slackUserId);
+  }));
+  return operators.size;
+}
+
+function isChannelOperator(member: DashboardChannelMember) {
+  return member.channelRole === "CSM" || member.channelRole === "ADMIN";
 }
 
 function roleSelect(name: string, selected: UserRole) {
@@ -892,28 +921,14 @@ async function loadChannels(): Promise<DashboardChannel[]> {
         members: channel.members.map((member) => ({
           slackUserId: member.user.slackUserId,
           name: member.user.name,
-          role: member.user.role
+          role: member.user.role,
+          channelRole: member.role
         })),
         openRequests,
         totalRequests
       };
     })
   );
-}
-
-async function loadCsms() {
-  return prisma.user.findMany({
-    where: { OR: [{ role: "CSM" }, { role: "ADMIN" }, { isAdmin: true }] },
-    orderBy: [{ name: "asc" }, { slackUserId: "asc" }],
-    select: { slackUserId: true, name: true, role: true }
-  });
-}
-
-async function loadUsers() {
-  return prisma.user.findMany({
-    orderBy: [{ role: "asc" }, { name: "asc" }, { slackUserId: "asc" }],
-    select: { slackUserId: true, name: true, role: true }
-  });
 }
 
 async function loadRequestStats() {
@@ -986,8 +1001,6 @@ async function syncSlackChannelMembers(slackChannelId: string) {
     return;
   }
 
-  await prisma.channelMember.deleteMany({ where: { slackChannelId } });
-
   for (const slackUserId of memberIds) {
     if (!slackUserId) continue;
     await ensureNamedUser(slackUserId);
@@ -997,6 +1010,13 @@ async function syncSlackChannelMembers(slackChannelId: string) {
       create: { slackChannelId, slackUserId }
     });
   }
+
+  await prisma.channelMember.deleteMany({
+    where: {
+      slackChannelId,
+      slackUserId: { notIn: memberIds }
+    }
+  });
 }
 
 async function ensureNamedUser(slackUserId: string) {
@@ -1168,14 +1188,20 @@ function css() {
     .top-nav a:hover { background: #eef4ff; color: var(--blue-dark); }
     .top-nav a.active { color: var(--blue); border-bottom-color: var(--blue); }
     .button-link { display: inline-flex; align-items: center; min-height: 38px; border-radius: 8px; padding: 8px 14px; background: var(--blue); color: white; text-decoration: none; font-weight: 700; }
+    .button-link.small { min-height: 32px; padding: 6px 11px; font-size: 13px; }
+    .button-link.secondary { background: #f1f3f4; color: #3c4043; }
     .eyebrow { color: var(--blue); font-weight: 700; margin: 0 0 8px; text-transform: uppercase; font-size: 12px; letter-spacing: 0; }
-    h1, h2 { margin: 0; letter-spacing: 0; }
+    h1, h2, h3 { margin: 0; letter-spacing: 0; }
     h1 { font-size: 34px; line-height: 1.12; font-weight: 750; }
     h2 { font-size: 18px; }
+    h3 { font-size: 15px; margin-bottom: 10px; }
     .muted { color: var(--muted); }
     .notice { background: #e8f0fe; border: 1px solid #d2e3fc; padding: 12px 14px; border-radius: 8px; margin-bottom: 16px; color: #174ea6; }
     .grid { display: grid; grid-template-columns: 360px 1fr; gap: 16px; margin-bottom: 16px; }
     .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px; box-shadow: 0 1px 2px rgba(60, 64, 67, .12); }
+    .focus-panel { margin-bottom: 16px; border-color: #c2d7ff; box-shadow: 0 2px 8px rgba(26, 115, 232, .12); }
+    .subtle-panel { box-shadow: none; background: #fbfdff; }
+    .settings-note { display: grid; align-content: start; gap: 12px; }
     .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
     .stack { display: grid; gap: 12px; margin-top: 14px; }
     .inline { display: grid; grid-template-columns: minmax(150px, 1fr) auto; gap: 8px; align-items: center; }

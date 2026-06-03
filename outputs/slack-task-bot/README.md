@@ -286,9 +286,8 @@ The dashboard currently supports:
 - Metrics, channel management, and settings pages
 - Syncing public/private Slack channels and channel members the bot can see
 - Viewing all known channels
-- Whitelisting CSM Slack user IDs
 - Assigning channel ownership from each channel's synced member list
 - Uploading an OpenAI API key from the dashboard
-- Assigning simple roles: `ADMIN`, `CSM`, `SALES_REP`, `REQUESTER`
+- Assigning channel-scoped member roles: `ADMIN`, `CSM`, `SALES_REP`, `REQUESTER`
 - Viewing basic open/total request counts per channel
 - Viewing immediate request counts by status, request type, channel, and recent activity

@@ -12,7 +12,7 @@ export async function getChannelOwner(slackChannelId: string): Promise<string | 
 
 export async function mapChannelOwner(slackChannelId: string, ownerSlackUserId: string) {
   await ensureChannel(slackChannelId);
-  await ensureUser(ownerSlackUserId, undefined, false, "CSM");
+  await ensureUser(ownerSlackUserId);
 
   return prisma.channelOwnerMapping.upsert({
     where: { slackChannelId },

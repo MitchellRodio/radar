@@ -19,9 +19,17 @@ export async function canManageRequest(slackUserId: string, requestId: number): 
     where: { id: requestId },
     select: {
       ownerSlackUserId: true,
-      owner: { select: { role: true, isAdmin: true } }
+      channelId: true
     }
   });
 
-  return Boolean(request && request.ownerSlackUserId === slackUserId && (request.owner.role === "CSM" || request.owner.role === "ADMIN" || request.owner.isAdmin));
+  if (!request) return false;
+  if (request.ownerSlackUserId === slackUserId) return true;
+
+  const channelMember = await prisma.channelMember.findUnique({
+    where: { slackChannelId_slackUserId: { slackChannelId: request.channelId, slackUserId } },
+    select: { role: true }
+  });
+
+  return Boolean(channelMember && (channelMember.role === "CSM" || channelMember.role === "ADMIN"));
 }
