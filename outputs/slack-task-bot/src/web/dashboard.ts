@@ -3,7 +3,7 @@ import { createHmac, timingSafeEqual } from "crypto";
 import { WebClient } from "@slack/web-api";
 import type { RequestStatus, RequestType, UserRole } from "@prisma/client";
 import { config } from "../lib/config";
-import { parseDueDate } from "../lib/dates";
+import { formatDate, parseDueDate } from "../lib/dates";
 import { logger } from "../lib/logger";
 import { canManageRequest, isAdmin } from "../lib/permissions";
 import { prisma } from "../lib/prisma";
@@ -25,7 +25,7 @@ import {
   updateRequesterMessageReference
 } from "../services/requestService";
 import { ensureChannel, ensureUser } from "../services/userService";
-import { queueSplititAutomation } from "../services/splititAutomationService";
+import { isLiveSplititJob, queueSplititAutomation, sendManualSplititMessage } from "../services/splititAutomationService";
 import { helpBlocks, inputModal, requestCreateModal, requestDetailModal, requestListBlocks } from "../slack/blocks";
 import { statusLabel, typeLabel } from "../slack/format";
 import {
@@ -122,6 +122,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/dashboard/splitit") {
+    await renderSplitit(res, url.searchParams.get("notice") ?? "", url.searchParams.get("job") ?? "");
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/dashboard/settings") {
     await renderSettings(res, url.searchParams.get("notice") ?? "");
     return;
@@ -152,6 +157,17 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       clearWebhookSecret: body.get("clearSplititWebhookSecret") === "on"
     });
     redirect(res, "/dashboard/settings?notice=Splitit agent settings updated");
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/dashboard/splitit/manual-message") {
+    const body = await readForm(req);
+    const jobId = (body.get("jobId") ?? "").trim();
+    const message = (body.get("message") ?? "").trim();
+    const actorSlackUserId = (body.get("actorSlackUserId") ?? "").trim() || config.adminSlackUserIds[0] || "dashboard";
+    const result = jobId ? await sendManualSplititMessage(jobId, actorSlackUserId, message) : { error: "Missing Splitit job.", job: null };
+    const notice = result.error ? result.error : "Manual message sent";
+    redirect(res, `/dashboard/splitit?job=${encodeURIComponent(jobId)}&notice=${encodeURIComponent(notice)}`);
     return;
   }
 
@@ -775,11 +791,59 @@ async function renderSettings(res: ServerResponse, notice: string) {
   );
 }
 
-function nav(active: "metrics" | "channels" | "settings") {
+async function renderSplitit(res: ServerResponse, notice: string, selectedJobId: string) {
+  const jobs = await loadSplititJobs();
+  const selectedJob = selectedJobId
+    ? jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null
+    : jobs[0] ?? null;
+  const liveJobs = jobs.filter((job) => isLiveSplititJob(job.status)).length;
+
+  sendHtml(
+    res,
+    200,
+    page(
+      "Radar Splitit",
+      `
+      ${nav("splitit")}
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Splitit agent desk</p>
+          <h1>Live Splitit chats</h1>
+          <p class="muted">Watch concurrent Splitit whitelist sessions, review the full transcript, and manually send a message when you need to take over.</p>
+        </div>
+        <a class="button-link secondary" href="/dashboard/settings">Agent settings</a>
+      </section>
+      ${notice ? `<div class="notice">${escapeHtml(notice)}</div>` : ""}
+      <section class="stat-grid splitit-stats">
+        ${statCard("All Splitit chats", jobs.length)}
+        ${statCard("Live agents", liveJobs)}
+        ${statCard("Off or done", jobs.length - liveJobs)}
+      </section>
+      <section class="splitit-layout">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Concurrent chats</h2>
+            <span class="muted">${liveJobs} live</span>
+          </div>
+          <div class="splitit-chat-list">
+            ${jobs.length ? jobs.map((job) => splititJobCard(job, selectedJob?.id ?? "")).join("") : `<p class="muted">No Splitit chats yet.</p>`}
+          </div>
+        </div>
+        <div class="panel splitit-detail">
+          ${selectedJob ? splititJobDetail(selectedJob) : `<p class="muted">Queue a Splitit agent from a Splitit whitelist request to see it here.</p>`}
+        </div>
+      </section>
+      `
+    )
+  );
+}
+
+function nav(active: "metrics" | "channels" | "splitit" | "settings") {
   return `
     <nav class="top-nav">
       <a class="${active === "metrics" ? "active" : ""}" href="/dashboard/metrics">Metrics</a>
       <a class="${active === "channels" ? "active" : ""}" href="/dashboard/channels">Channels</a>
+      <a class="${active === "splitit" ? "active" : ""}" href="/dashboard/splitit">Splitit</a>
       <a class="${active === "settings" ? "active" : ""}" href="/dashboard/settings">Settings</a>
     </nav>
   `;
@@ -816,6 +880,75 @@ function recentRequests(requests: Awaited<ReturnType<typeof loadRequestStats>>["
       `).join("")}
     </div>
   `;
+}
+
+function splititJobCard(job: Awaited<ReturnType<typeof loadSplititJobs>>[number], selectedJobId: string) {
+  const live = isLiveSplititJob(job.status);
+  const company = job.request.channel?.companyName ?? job.request.channel?.name ?? job.request.channelId;
+  return `
+    <a class="splitit-job ${job.id === selectedJobId ? "active" : ""}" href="/dashboard/splitit?job=${encodeURIComponent(job.id)}">
+      <span class="agent-light ${live ? "live" : "off"}"></span>
+      <span>
+        <strong>${escapeHtml(job.targetEmail)}</strong>
+        <small>${escapeHtml(company)} | ${escapeHtml(splititStatusLabel(job.status))}</small>
+      </span>
+    </a>
+  `;
+}
+
+function splititJobDetail(job: Awaited<ReturnType<typeof loadSplititJobs>>[number]) {
+  const live = isLiveSplititJob(job.status);
+  const company = job.request.channel?.companyName ?? job.request.channel?.name ?? job.request.channelId;
+  return `
+    <div class="panel-head">
+      <div>
+        <h2>${escapeHtml(job.targetEmail)}</h2>
+        <span class="muted">${escapeHtml(company)} | Request ${job.requestId}</span>
+      </div>
+      <span class="agent-state ${live ? "live" : "off"}"><span class="agent-light ${live ? "live" : "off"}"></span>${live ? "Live agent" : "Agent off"}</span>
+    </div>
+    <div class="splitit-meta">
+      <span><strong>Status</strong>${escapeHtml(splititStatusLabel(job.status))}</span>
+      <span><strong>Step</strong>${escapeHtml(splititStatusLabel(job.step))}</span>
+      <span><strong>Attempts</strong>${job.attempts}</span>
+      <span><strong>Updated</strong>${formatDate(job.updatedAt)}</span>
+    </div>
+    ${job.error ? `<div class="notice danger">${escapeHtml(job.error)}</div>` : ""}
+    <div class="splitit-transcript">
+      ${job.messages.length ? job.messages.map(splititMessageBubble).join("") : `<p class="muted">No messages recorded yet.</p>`}
+    </div>
+    <form class="manual-message" method="post" action="/dashboard/splitit/manual-message">
+      <input type="hidden" name="jobId" value="${escapeHtml(job.id)}" />
+      <label>Manual message
+        <textarea name="message" rows="3" placeholder="Type a message to send into the Splitit chat" ${live ? "" : "disabled"}></textarea>
+      </label>
+      <label>Slack user ID for audit
+        <input name="actorSlackUserId" placeholder="${escapeHtml(config.adminSlackUserIds[0] ?? "dashboard")}" ${live ? "" : "disabled"} />
+      </label>
+      <button type="submit" ${live ? "" : "disabled"}>Send message</button>
+    </form>
+  `;
+}
+
+function splititMessageBubble(message: Awaited<ReturnType<typeof loadSplititJobs>>[number]["messages"][number]) {
+  return `
+    <div class="splitit-message ${message.sender.toLowerCase()}">
+      <div class="bubble">
+        <strong>${escapeHtml(splititSenderLabel(message.sender))}</strong>
+        <p>${escapeHtml(message.body)}</p>
+        <small>${formatDate(message.createdAt)}${message.createdBySlackUserId ? ` | ${escapeHtml(message.createdBySlackUserId)}` : ""}</small>
+      </div>
+    </div>
+  `;
+}
+
+function splititStatusLabel(value: string) {
+  return value.toLowerCase().replace(/_/g, " ");
+}
+
+function splititSenderLabel(value: string) {
+  if (value === "CSM") return "CSM";
+  return splititStatusLabel(value);
 }
 
 function channelRow(channel: DashboardChannel) {
@@ -999,6 +1132,21 @@ async function loadRequestStats() {
   };
 }
 
+async function loadSplititJobs() {
+  return prisma.splititAutomationJob.findMany({
+    include: {
+      request: {
+        include: { channel: true }
+      },
+      messages: {
+        orderBy: { createdAt: "asc" }
+      }
+    },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+    take: 250
+  });
+}
+
 async function syncSlackChannels() {
   let cursor: string | undefined;
   do {
@@ -1083,6 +1231,7 @@ function page(title: string, body: string) {
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>${escapeHtml(title)}</title>
+      ${title === "Radar Splitit" ? `<meta http-equiv="refresh" content="15" />` : ""}
       <style>${css()}</style>
     </head>
     <body>
@@ -1235,6 +1384,7 @@ function css() {
     h3 { font-size: 15px; margin-bottom: 10px; }
     .muted { color: var(--muted); }
     .notice { background: #e8f0fe; border: 1px solid #d2e3fc; padding: 12px 14px; border-radius: 8px; margin-bottom: 16px; color: #174ea6; }
+    .notice.danger { background: #fce8e6; border-color: #fad2cf; color: var(--red); }
     .grid { display: grid; grid-template-columns: 360px 1fr; gap: 16px; margin-bottom: 16px; }
     .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px; box-shadow: 0 1px 2px rgba(60, 64, 67, .12); }
     .focus-panel { margin-bottom: 16px; border-color: #c2d7ff; box-shadow: 0 2px 8px rgba(26, 115, 232, .12); }
@@ -1246,9 +1396,11 @@ function css() {
     .check-row { display: flex; grid-template-columns: none; align-items: center; gap: 8px; }
     .check-row input { width: auto; min-height: auto; }
     label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
-    input, select { width: 100%; min-height: 38px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: #fff; color: var(--text); font: inherit; outline-color: var(--blue); }
+    input, select, textarea { width: 100%; min-height: 38px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: #fff; color: var(--text); font: inherit; outline-color: var(--blue); }
+    textarea { resize: vertical; line-height: 1.45; }
     button { min-height: 38px; border: 0; border-radius: 8px; padding: 8px 14px; background: var(--blue); color: white; font-weight: 700; cursor: pointer; box-shadow: 0 1px 1px rgba(60, 64, 67, .18); }
     button:hover { background: var(--blue-dark); }
+    button:disabled, textarea:disabled, input:disabled { opacity: .55; cursor: not-allowed; }
     .stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; align-items: center; }
     .stat-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 16px; margin-bottom: 16px; }
     .stat-card { min-height: 106px; display: flex; flex-direction: column; justify-content: center; }
@@ -1261,6 +1413,34 @@ function css() {
     .recent-item { display: grid; gap: 4px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
     .recent-item:last-child { border-bottom: 0; padding-bottom: 0; }
     .recent-item span { color: var(--muted); font-size: 13px; }
+    .splitit-layout { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 16px; align-items: start; }
+    .splitit-stats { grid-template-columns: repeat(3, 1fr); }
+    .splitit-chat-list { display: grid; gap: 8px; }
+    .splitit-job { display: grid; grid-template-columns: 12px 1fr; gap: 10px; align-items: center; padding: 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); text-decoration: none; background: #fff; }
+    .splitit-job:hover, .splitit-job.active { border-color: #c2d7ff; background: #f8fbff; }
+    .splitit-job small { display: block; margin-top: 3px; color: var(--muted); text-transform: capitalize; }
+    .agent-light { width: 10px; height: 10px; border-radius: 999px; display: inline-block; box-shadow: 0 0 0 3px rgba(95, 99, 104, .12); }
+    .agent-light.live { background: var(--green); box-shadow: 0 0 0 3px rgba(24, 128, 56, .14); }
+    .agent-light.off { background: var(--red); box-shadow: 0 0 0 3px rgba(217, 48, 37, .14); }
+    .agent-state { display: inline-flex; align-items: center; gap: 8px; border-radius: 999px; padding: 6px 10px; font-size: 12px; font-weight: 700; background: #f1f3f4; color: #3c4043; }
+    .agent-state.live { background: #e6f4ea; color: var(--green); }
+    .agent-state.off { background: #fce8e6; color: var(--red); }
+    .splitit-meta { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+    .splitit-meta span { display: grid; gap: 4px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); text-transform: capitalize; }
+    .splitit-meta strong { color: var(--text); font-size: 12px; text-transform: uppercase; }
+    .splitit-transcript { display: grid; gap: 10px; max-height: 560px; overflow: auto; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: #f8fafd; margin-bottom: 14px; }
+    .splitit-message { display: flex; }
+    .splitit-message.agent, .splitit-message.csm { justify-content: flex-end; }
+    .splitit-message.splitit, .splitit-message.system { justify-content: flex-start; }
+    .bubble { max-width: min(680px, 88%); padding: 10px 12px; border-radius: 8px; background: #fff; border: 1px solid var(--line); }
+    .splitit-message.agent .bubble { background: #e8f0fe; border-color: #d2e3fc; }
+    .splitit-message.csm .bubble { background: #e6f4ea; border-color: #ceead6; }
+    .splitit-message.splitit .bubble { background: #fff; }
+    .splitit-message.system .bubble { background: #f1f3f4; }
+    .bubble strong { display: block; margin-bottom: 5px; font-size: 12px; text-transform: capitalize; color: var(--muted); }
+    .bubble p { margin: 0; white-space: pre-wrap; }
+    .bubble small { display: block; margin-top: 7px; color: var(--muted); font-size: 11px; }
+    .manual-message { display: grid; gap: 10px; }
     .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
     table { width: 100%; border-collapse: collapse; min-width: 980px; }
     th, td { padding: 12px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
@@ -1274,6 +1454,6 @@ function css() {
     .login-panel { max-width: 440px; margin: 15vh auto 0; }
     .login { display: grid; gap: 14px; margin-top: 18px; }
     @media (max-width: 1000px) { .stat-grid { grid-template-columns: repeat(3, 1fr); } }
-    @media (max-width: 820px) { main { width: min(100vw - 24px, 1180px); padding-top: 20px; } .hero, .panel-head { align-items: stretch; flex-direction: column; } .grid { grid-template-columns: 1fr; } .stat-row, .stat-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 820px) { main { width: min(100vw - 24px, 1180px); padding-top: 20px; } .hero, .panel-head { align-items: stretch; flex-direction: column; } .grid, .splitit-layout { grid-template-columns: 1fr; } .stat-row, .stat-grid, .splitit-meta { grid-template-columns: 1fr; } }
   `;
 }

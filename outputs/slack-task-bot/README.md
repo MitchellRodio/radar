@@ -316,9 +316,13 @@ To connect the real Splitit chat automation, set `SPLITIT_AGENT_WEBHOOK_URL` in 
   "jobId": "job_id",
   "requestId": 123,
   "targetEmail": "customer@example.com",
-  "messages": ["Mitchell Rodio", "Merchant", "Whop.com mitchell.rodio@whop.com", "Please whitelist, I understand the risks customer@example.com"]
+  "messages": ["Mitchell Rodio", "Merchant", "Whop.com mitchell.rodio@whop.com", "Please whitelist, I understand the risks customer@example.com"],
+  "action": "run_script",
+  "splititUrl": "https://splitit.com"
 }
 ```
+
+The executor should open `https://splitit.com`, click the chat in the bottom-right corner, send the scripted messages in order, and return the latest Splitit response.
 
 The executor should return:
 
@@ -333,3 +337,5 @@ or:
 ```
 
 If no executor webhook is configured, the job blocks cleanly and DMs the owner with the exact script that is ready to send.
+
+The `/dashboard/splitit` page shows all Splitit automation chats, records every agent/Splitit/CSM/system message, and lets an admin manually send a message into a live chat through the executor webhook.

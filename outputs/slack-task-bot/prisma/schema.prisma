@@ -64,6 +64,13 @@ enum SplititAutomationStep {
   BLOCKED
 }
 
+enum SplititMessageSender {
+  AGENT
+  SPLITIT
+  CSM
+  SYSTEM
+}
+
 model User {
   id          String   @id @default(cuid())
   slackUserId String   @unique
@@ -188,8 +195,22 @@ model SplititAutomationJob {
   updatedAt             DateTime                 @updatedAt
 
   request Request @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  messages SplititAutomationMessage[]
 
   @@index([status, nextRunAt])
+}
+
+model SplititAutomationMessage {
+  id                   String               @id @default(cuid())
+  jobId                String
+  sender               SplititMessageSender
+  body                 String
+  createdBySlackUserId String?
+  createdAt            DateTime             @default(now())
+
+  job SplititAutomationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, createdAt])
 }
 
 model InternalNote {
