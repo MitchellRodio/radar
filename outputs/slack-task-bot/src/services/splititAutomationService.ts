@@ -1,4 +1,3 @@
-import { WebClient } from "@slack/web-api";
 import { Prisma, Request, SplititAutomationJob } from "@prisma/client";
 import { config } from "../lib/config";
 import { logger } from "../lib/logger";
@@ -17,7 +16,7 @@ type SplititWebhookResponse = {
   error?: string;
 };
 
-export async function queueSplititAutomation(client: WebClient, requestId: number, actorSlackUserId: string) {
+export async function queueSplititAutomation(client: any, requestId: number, actorSlackUserId: string) {
   const request = await prisma.request.findUnique({
     where: { id: requestId },
     include: { splititAutomationJob: true }
@@ -93,7 +92,7 @@ export async function queueSplititAutomation(client: WebClient, requestId: numbe
   return { request: updatedRequest, job, error: null };
 }
 
-export async function processDueSplititJobs(client: WebClient) {
+export async function processDueSplititJobs(client: any) {
   const jobs = await prisma.splititAutomationJob.findMany({
     where: {
       status: { in: ["QUEUED", "RUNNING", "WAITING_ON_SPLITIT"] },
@@ -118,7 +117,7 @@ export function splititMessages(job: Pick<SplititAutomationJob, "csmName" | "mer
   ];
 }
 
-async function processSplititJob(client: WebClient, job: SplititAutomationJob & { request: Request }) {
+async function processSplititJob(client: any, job: SplititAutomationJob & { request: Request }) {
   try {
     await prisma.splititAutomationJob.update({
       where: { id: job.id },
@@ -173,7 +172,7 @@ async function callSplititWebhook(job: SplititAutomationJob, webhookUrl: string,
   return response.json() as Promise<SplititWebhookResponse>;
 }
 
-async function applyWebhookResponse(client: WebClient, job: SplititAutomationJob & { request: Request }, response: SplititWebhookResponse) {
+async function applyWebhookResponse(client: any, job: SplititAutomationJob & { request: Request }, response: SplititWebhookResponse) {
   const status = response.status ?? "waiting";
   const responseText = response.response ?? "";
 
@@ -229,7 +228,7 @@ async function applyWebhookResponse(client: WebClient, job: SplititAutomationJob
   await recordAutomationUpdate(job.requestId, job.approvedBySlackUserId, responseText || "Splitit automation waiting on Splitit");
 }
 
-async function blockForMissingExecutor(client: WebClient, job: SplititAutomationJob & { request: Request }) {
+async function blockForMissingExecutor(client: any, job: SplititAutomationJob & { request: Request }) {
   const script = splititMessages(job);
   const error = "Splitit agent executor is not configured. Add a Splitit agent webhook URL in dashboard settings.";
   await prisma.splititAutomationJob.update({
