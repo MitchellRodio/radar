@@ -317,17 +317,23 @@ To connect the real Splitit chat automation, set `SPLITIT_AGENT_WEBHOOK_URL` in 
   "requestId": 123,
   "targetEmail": "customer@example.com",
   "messages": ["Mitchell Rodio", "Merchant", "Whop.com mitchell.rodio@whop.com", "Please whitelist, I understand the risks customer@example.com"],
+  "conversationPlan": [
+    { "step": "SENT_NAME", "waitFor": "Splitit chat is open and asks who is chatting or requests a name", "send": "Mitchell Rodio" },
+    { "step": "SENT_ROLE", "waitFor": "Splitit asks for account type, role, or whether this is merchant/customer", "send": "Merchant" },
+    { "step": "SENT_STORE_AND_EMAIL", "waitFor": "Splitit asks for store name and/or merchant account email", "send": "Whop.com mitchell.rodio@whop.com" },
+    { "step": "SENT_WHITELIST_REQUEST", "waitFor": "Splitit asks how it can help or is ready for the whitelist request", "send": "Please whitelist, I understand the risks customer@example.com" }
+  ],
   "action": "run_script",
   "splititUrl": "https://splitit.com"
 }
 ```
 
-The executor should open `https://splitit.com`, click the chat in the bottom-right corner, send the scripted messages in order, and return the latest Splitit response.
+The executor should open `https://splitit.com`, click the chat in the bottom-right corner, then use `conversationPlan` step-by-step. It should wait for the prompt described by `waitFor`, send only that step's `send` value, wait for the next prompt, and continue. It should not dump all messages at once.
 
 The executor should return:
 
 ```json
-{ "status": "waiting", "response": "Submitted to Splitit." }
+{ "status": "waiting", "response": "Submitted to Splitit.", "sentMessages": ["Mitchell Rodio", "Merchant"] }
 ```
 
 or:

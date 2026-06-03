@@ -14,6 +14,7 @@ type SplititWebhookResponse = {
   status?: "waiting" | "done" | "blocked" | "failed";
   response?: string;
   error?: string;
+  sentMessages?: string[];
 };
 
 export async function queueSplititAutomation(client: any, requestId: number, actorSlackUserId: string) {
@@ -60,7 +61,7 @@ export async function queueSplititAutomation(client: any, requestId: number, act
     }
   });
   await recordSplititMessage(job.id, "SYSTEM", `Automation queued by <@${actorSlackUserId}> for ${targetEmail}.`, actorSlackUserId);
-  await ensureScriptMessages(job);
+  await recordSplititMessage(job.id, "SYSTEM", `Plan ready: ${splititPlan(job).map((step) => `${step.waitFor} -> ${step.send}`).join(" | ")}`, actorSlackUserId);
 
   const updatedRequest = await setStatus(requestId, actorSlackUserId, "CUSTOM", "Splitit agent queued");
   await updateRequesterStatusMessage(client, updatedRequest);
@@ -116,6 +117,31 @@ export function splititMessages(job: Pick<SplititAutomationJob, "csmName" | "mer
     job.merchantRole,
     `${job.storeName} ${job.merchantEmail}`,
     `${job.riskAcknowledgement} ${job.targetEmail}`
+  ];
+}
+
+export function splititPlan(job: Pick<SplititAutomationJob, "csmName" | "merchantRole" | "storeName" | "merchantEmail" | "riskAcknowledgement" | "targetEmail">) {
+  return [
+    {
+      step: "SENT_NAME",
+      waitFor: "Splitit chat is open and asks who is chatting or requests a name",
+      send: job.csmName
+    },
+    {
+      step: "SENT_ROLE",
+      waitFor: "Splitit asks for account type, role, or whether this is merchant/customer",
+      send: job.merchantRole
+    },
+    {
+      step: "SENT_STORE_AND_EMAIL",
+      waitFor: "Splitit asks for store name and/or merchant account email",
+      send: `${job.storeName} ${job.merchantEmail}`
+    },
+    {
+      step: "SENT_WHITELIST_REQUEST",
+      waitFor: "Splitit asks how it can help or is ready for the whitelist request",
+      send: `${job.riskAcknowledgement} ${job.targetEmail}`
+    }
   ];
 }
 
@@ -175,7 +201,6 @@ async function processSplititJob(client: any, job: SplititAutomationJob & { requ
       return;
     }
 
-    await ensureScriptMessages(job);
     const response = await callSplititWebhook(job, settings.webhookUrl, settings.webhookSecret, { action: "run_script" });
     await applyWebhookResponse(client, job, response);
   } catch (error) {
@@ -209,6 +234,7 @@ async function callSplititWebhook(
       requestId: job.requestId,
       targetEmail: job.targetEmail,
       messages: splititMessages(job),
+      conversationPlan: splititPlan(job),
       action: extra.action,
       message: extra.message,
       splititUrl: "https://splitit.com"
@@ -225,6 +251,9 @@ async function callSplititWebhook(
 async function applyWebhookResponse(client: any, job: SplititAutomationJob & { request: Request }, response: SplititWebhookResponse, actorSlackUserId?: string) {
   const status = response.status ?? "waiting";
   const responseText = response.response ?? "";
+  for (const message of response.sentMessages ?? []) {
+    await recordSplititMessage(job.id, "AGENT", message, actorSlackUserId ?? job.approvedBySlackUserId ?? undefined);
+  }
   if (responseText) await recordSplititMessage(job.id, "SPLITIT", responseText, actorSlackUserId);
 
   if (status === "done") {
@@ -284,7 +313,7 @@ async function applyWebhookResponse(client: any, job: SplititAutomationJob & { r
 }
 
 async function blockForMissingExecutor(client: any, job: SplititAutomationJob & { request: Request }) {
-  const script = splititMessages(job);
+  const plan = splititPlan(job);
   const error = "Splitit agent executor is not configured. Add a Splitit agent webhook URL in dashboard settings.";
   await prisma.splititAutomationJob.update({
     where: { id: job.id },
@@ -292,9 +321,10 @@ async function blockForMissingExecutor(client: any, job: SplititAutomationJob & 
       status: "BLOCKED",
       step: "BLOCKED",
       error,
-      lastMessage: script.join("\n")
+      lastMessage: plan.map((step) => `${step.waitFor} -> ${step.send}`).join("\n")
     }
   });
+  await recordSplititMessage(job.id, "SYSTEM", "Executor missing. No Splitit chat messages were sent.", job.approvedBySlackUserId ?? undefined);
 
   const request = await setBlocker(job.requestId, job.approvedBySlackUserId ?? job.request.ownerSlackUserId, error);
   await updateRequesterStatusMessage(client, request);
@@ -309,23 +339,12 @@ async function blockForMissingExecutor(client: any, job: SplititAutomationJob & 
           text:
             `*Splitit agent blocked: executor missing*\n` +
             `${escapeMrkdwn(error)}\n\n` +
-            `*Script ready to send:*\n${script.map((message) => `- ${escapeMrkdwn(message)}`).join("\n")}`
+            `*Step-by-step plan:*\n${plan.map((step) => `- Wait for: ${escapeMrkdwn(step.waitFor)}\n  Send: ${escapeMrkdwn(step.send)}`).join("\n")}`
         }
       }
     ]
   });
   await recordAutomationUpdate(job.requestId, job.approvedBySlackUserId, error);
-}
-
-async function ensureScriptMessages(job: SplititAutomationJob) {
-  const existingScriptMessages = await prisma.splititAutomationMessage.count({
-    where: { jobId: job.id, sender: "AGENT" }
-  });
-  if (existingScriptMessages > 0) return;
-
-  for (const message of splititMessages(job)) {
-    await recordSplititMessage(job.id, "AGENT", message, job.approvedBySlackUserId ?? undefined);
-  }
 }
 
 export async function recordSplititMessage(jobId: string, sender: SplititMessageSender, body: string, createdBySlackUserId?: string | null) {

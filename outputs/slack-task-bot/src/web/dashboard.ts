@@ -948,6 +948,7 @@ function splititStatusLabel(value: string) {
 
 function splititSenderLabel(value: string) {
   if (value === "CSM") return "CSM";
+  if (value === "SYSTEM") return "System / plan";
   return splititStatusLabel(value);
 }
 
