@@ -1,4 +1,4 @@
-import { InternalNote, Request, RequestType, RequestUpdate, User, Channel, SplititAutomationJob } from "@prisma/client";
+import { ChannelWhopBusiness, InternalNote, Request, RequestType, RequestUpdate, User, Channel, SplititAutomationJob } from "@prisma/client";
 import { formatDate } from "../lib/dates";
 import { statusLabel, threadLink, typeLabel } from "./format";
 
@@ -99,6 +99,13 @@ export function requestDetailBlocks(request: RequestWithRelations) {
           ])
         ]
       : []),
+    ...(request.type === "CHECKOUT_LINK"
+      ? [
+          actions([
+            button("Create checkout link", "request_checkout_link_open", String(request.id), "primary")
+          ])
+        ]
+      : []),
     actions([
       button("Close View", "request_close_view", String(request.id), "danger")
     ])
@@ -125,6 +132,81 @@ export function requestDetailModal(request: RequestWithRelations) {
     title: { type: "plain_text", text: request.title.slice(0, 24) || `Request ${request.id}` },
     close: { type: "plain_text", text: "Close" },
     blocks: requestDetailBlocks(request)
+  };
+}
+
+export function checkoutLinkModal(request: RequestWithRelations, businesses: ChannelWhopBusiness[]) {
+  const extracted = request.extractedFields as Record<string, unknown>;
+  const initialAmount = parseAmountFromText(String(extracted.amount ?? "") || request.description);
+  const initialSplititOnly = /splitit/i.test(request.description) || /splitit/i.test(String(extracted.paymentProvider ?? ""));
+
+  return {
+    type: "modal",
+    callback_id: `checkout_link_create:${request.id}`,
+    title: { type: "plain_text", text: "Checkout link" },
+    submit: { type: "plain_text", text: "Create" },
+    close: { type: "plain_text", text: "Cancel" },
+    blocks: [
+      {
+        type: "input",
+        block_id: "business",
+        element: {
+          type: "static_select",
+          action_id: "value",
+          placeholder: { type: "plain_text", text: "Choose business" },
+          options: businesses.slice(0, 100).map((business) => checkoutBusinessOption(business)),
+          ...(businesses.length === 1 ? { initial_option: checkoutBusinessOption(businesses[0]) } : {})
+        },
+        label: { type: "plain_text", text: "Whop business" }
+      },
+      {
+        type: "input",
+        block_id: "amount",
+        element: {
+          type: "plain_text_input",
+          action_id: "value",
+          placeholder: { type: "plain_text", text: "2100" },
+          ...(initialAmount ? { initial_value: String(initialAmount) } : {})
+        },
+        label: { type: "plain_text", text: "Amount in USD" }
+      },
+      {
+        type: "input",
+        block_id: "title",
+        element: {
+          type: "plain_text_input",
+          action_id: "value",
+          initial_value: request.title.slice(0, 30) || "Checkout link"
+        },
+        label: { type: "plain_text", text: "Checkout title" }
+      },
+      {
+        type: "input",
+        block_id: "description",
+        optional: true,
+        element: {
+          type: "plain_text_input",
+          action_id: "value",
+          multiline: true,
+          initial_value: request.description.slice(0, 1000)
+        },
+        label: { type: "plain_text", text: "Checkout description" }
+      },
+      {
+        type: "input",
+        block_id: "splititOnly",
+        optional: true,
+        element: {
+          type: "checkboxes",
+          action_id: "value",
+          options: [{ text: { type: "plain_text", text: "Splitit only" }, value: "splitit_only" }],
+          ...(initialSplititOnly
+            ? { initial_options: [{ text: { type: "plain_text", text: "Splitit only" }, value: "splitit_only" }] }
+            : {})
+        },
+        label: { type: "plain_text", text: "Payment method" }
+      }
+    ]
   };
 }
 
@@ -261,11 +343,26 @@ function threadText(request: Request) {
   return `<${threadLink(request.channelId, request.threadTs)}|Open thread>`;
 }
 
+function checkoutBusinessOption(business: ChannelWhopBusiness) {
+  return {
+    text: { type: "plain_text", text: `${business.businessName}${business.apiKey ? "" : " (missing key)"}`.slice(0, 75) },
+    value: business.id
+  };
+}
+
 function requestTypeOption(type: RequestType) {
   return {
     text: { type: "plain_text", text: typeLabel(type) },
     value: type
   };
+}
+
+function parseAmountFromText(text: string) {
+  const match = text.match(/(?:\$|usd\s*)?\s*([0-9][0-9,]*(?:\.\d{1,2})?)\s*([kK])?\b/);
+  if (!match) return "";
+  const number = Number(match[1].replace(/,/g, ""));
+  if (!Number.isFinite(number) || number <= 0) return "";
+  return match[2] ? Math.round(number * 1000) : number;
 }
 
 function escapeMrkdwn(value: string) {

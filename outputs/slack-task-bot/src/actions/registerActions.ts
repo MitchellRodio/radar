@@ -3,7 +3,7 @@ import { RequestStatus, RequestType } from "@prisma/client";
 import { parseDueDate } from "../lib/dates";
 import { logger } from "../lib/logger";
 import { canManageRequest } from "../lib/permissions";
-import { inputModal, requestDetailModal } from "../slack/blocks";
+import { checkoutLinkModal, inputModal, requestDetailModal } from "../slack/blocks";
 import {
   notifyOwnerRequestCreated,
   postRequesterNeedsInfo,
@@ -18,6 +18,7 @@ import {
   extractSlackUserId,
   getRequest,
   parseRequestId,
+  recordRequesterNotification,
   reassignRequest,
   setBlocker,
   setDueDate,
@@ -25,6 +26,7 @@ import {
   updateRequesterMessageReference
 } from "../services/requestService";
 import { queueSplititAutomation } from "../services/splititAutomationService";
+import { createCheckoutLink, listCheckoutBusinessesForRequest } from "../services/checkoutLinkService";
 
 export function registerActions(app: App) {
   app.action("request_view", async ({ ack, body, client, action }: any) => {
@@ -110,6 +112,29 @@ export function registerActions(app: App) {
     if (result.error) {
       await notifyActionFailure(client, actorSlackUserId, result.error);
     }
+  });
+
+  app.action("request_checkout_link_open", async ({ ack, body, client, action }: any) => {
+    await ack();
+    const requestId = parseRequestId(action.value);
+    const actorSlackUserId = body.user.id;
+    if (!requestId || !(await canManageRequest(actorSlackUserId, requestId))) return;
+
+    const [request, businesses] = await Promise.all([
+      getRequest(requestId),
+      listCheckoutBusinessesForRequest(requestId)
+    ]);
+
+    if (!request) return;
+    if (!businesses.length) {
+      await notifyActionFailure(client, actorSlackUserId, "No Whop businesses are mapped to this Slack channel yet. Add one in `/dashboard/whop`.");
+      return;
+    }
+
+    await client.views.push({
+      trigger_id: body.trigger_id,
+      view: checkoutLinkModal(request, businesses)
+    });
   });
 
   app.action("request_close_view", async ({ ack }: any) => {
@@ -228,6 +253,57 @@ export function registerActions(app: App) {
       return request;
     });
   });
+
+  app.view(/^checkout_link_create:/, async ({ ack, body, view, client }: any) => {
+    const requestId = parseRequestId(view.callback_id.split(":")[1]);
+    const actorSlackUserId = body.user.id;
+    const businessMappingId = modalSelectedValue(view, "business");
+    const amount = parseCheckoutAmount(modalValue(view, "amount"));
+    const title = modalValue(view, "title").trim();
+    const description = modalValue(view, "description").trim();
+    const splititOnly = modalCheckboxSelected(view, "splititOnly", "splitit_only");
+
+    const errors: Record<string, string> = {};
+    if (!businessMappingId) errors.business = "Choose the Whop business.";
+    if (!amount) errors.amount = "Enter a valid amount, like 2100 or 2.1k.";
+    if (!title) errors.title = "Add a checkout title.";
+
+    if (Object.keys(errors).length) {
+      await ack({ response_action: "errors", errors });
+      return;
+    }
+
+    if (!requestId || !(await canManageRequest(actorSlackUserId, requestId))) {
+      await ack();
+      return;
+    }
+
+    await ack({
+      response_action: "update",
+      view: processingModal("Creating checkout link")
+    });
+
+    const result = await createCheckoutLink({
+      requestId,
+      actorSlackUserId,
+      businessMappingId,
+      amount,
+      title,
+      description,
+      splititOnly
+    });
+
+    if (result.error || !result.request) {
+      await notifyActionFailure(client, actorSlackUserId, result.error || "Could not create checkout link.");
+      const request = requestId ? await getRequest(requestId) : null;
+      if (request) await updateModalById(client, body.view?.id, request);
+      return;
+    }
+
+    await updateRequesterStatusMessage(client, result.request);
+    await postCheckoutLinkToRequester(client, result.request, actorSlackUserId, result.checkoutUrl, splititOnly);
+    await updateModalById(client, body.view?.id, result.request);
+  });
 }
 
 async function openRequestDetailFromAction(client: any, body: any, action: any) {
@@ -310,10 +386,66 @@ async function updateCurrentModal(client: any, body: any, request: any) {
   });
 }
 
+async function updateModalById(client: any, viewId: string | undefined, request: any) {
+  if (!viewId) return;
+
+  await client.views.update({
+    view_id: viewId,
+    view: requestDetailModal(request)
+  });
+}
+
 function modalValue(view: any, blockId: string): string {
   return view.state.values[blockId]?.value?.value ?? "";
 }
 
 function modalSelectedValue(view: any, blockId: string): string {
   return view.state.values[blockId]?.value?.selected_option?.value ?? "";
+}
+
+function modalCheckboxSelected(view: any, blockId: string, value: string): boolean {
+  const selected = view.state.values[blockId]?.value?.selected_options ?? [];
+  return selected.some((option: any) => option.value === value);
+}
+
+function parseCheckoutAmount(value: string): number {
+  const match = value.trim().match(/^\$?\s*([0-9][0-9,]*(?:\.\d{1,2})?)\s*([kK])?$/);
+  if (!match) return 0;
+  const amount = Number(match[1].replace(/,/g, "")) * (match[2] ? 1000 : 1);
+  return Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : 0;
+}
+
+function processingModal(title: string) {
+  return {
+    type: "modal",
+    title: { type: "plain_text", text: title.slice(0, 24) },
+    close: { type: "plain_text", text: "Close" },
+    blocks: [
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: "Working on it..." }
+      }
+    ]
+  };
+}
+
+async function postCheckoutLinkToRequester(client: any, request: any, actorSlackUserId: string, checkoutUrl: string, splititOnly: boolean) {
+  const text = `Checkout link created for ${request.title}: ${checkoutUrl}`;
+  const message =
+    `<@${request.requesterSlackUserId}> Checkout link ready${splititOnly ? " (Splitit only)" : ""}: <${checkoutUrl}|Open checkout link>`;
+
+  if (request.threadTs.startsWith("manual-")) {
+    await client.chat.postMessage({
+      channel: request.requesterSlackUserId,
+      text: message
+    });
+  } else {
+    await client.chat.postMessage({
+      channel: request.channelId,
+      thread_ts: request.threadTs,
+      text: message
+    });
+  }
+
+  await recordRequesterNotification(request.id, actorSlackUserId, text);
 }
