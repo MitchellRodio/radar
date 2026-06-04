@@ -254,8 +254,44 @@ async function acceptCookieBanner(session: Session) {
   }
 
   if (await cookieBannerVisible(session.page)) {
+    await removeCookieBanner(session);
+  }
+
+  if (await cookieBannerVisible(session.page)) {
     throw new Error("Cookie banner is still visible; cannot open Splitit chat yet.");
   }
+}
+
+async function removeCookieBanner(session: Session) {
+  log(session, "Removing cookie banner overlay fallback");
+  for (const frame of session.page.frames()) {
+    try {
+      await frame.evaluate(() => {
+        const matchesCookieText = (element: Element) => /our cookies|manage cookies|accept all/i.test(element.textContent || "");
+        const candidates = Array.from(document.querySelectorAll("body *")).filter(matchesCookieText);
+        for (const candidate of candidates) {
+          let current: Element | null = candidate;
+          for (let depth = 0; current && depth < 6; depth += 1) {
+            const style = window.getComputedStyle(current);
+            const rect = current.getBoundingClientRect();
+            if (
+              (style.position === "fixed" || style.position === "sticky") &&
+              rect.width > window.innerWidth * 0.5 &&
+              rect.height > 80 &&
+              rect.bottom > window.innerHeight * 0.7
+            ) {
+              current.remove();
+              return;
+            }
+            current = current.parentElement;
+          }
+        }
+      });
+    } catch {
+      // Try the next frame.
+    }
+  }
+  await session.page.waitForTimeout(1000);
 }
 
 async function clickChatLauncher(session: Session) {
