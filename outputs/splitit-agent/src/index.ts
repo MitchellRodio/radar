@@ -367,6 +367,7 @@ async function clickChatLauncher(session: Session) {
 
 async function clickChatWithUsButton(session: Session) {
   await session.page.locator("text=Live chat").first().scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => undefined);
+  await acceptCookieBanner(session);
   await humanDelay(session, "Clicking Chat with us button");
   if (await clickElementByText(session, /^chat with us$/i, "Chat with us button")) return;
 
@@ -386,6 +387,11 @@ async function clickBottomRightLauncher(session: Session, label: string) {
 
 async function waitForChatReady(session: Session) {
   if (await waitUntilChatInputVisible(session.page, 20_000)) return;
+  if (await cookieBannerVisible(session.page)) {
+    await acceptCookieBanner(session);
+    await clickChatWithUsButton(session);
+    if (await waitUntilChatInputVisible(session.page, 20_000)) return;
+  }
   throw new Error("Chat is not open yet; no Splitit chat input is visible.");
 }
 
