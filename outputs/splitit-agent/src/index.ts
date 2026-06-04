@@ -65,7 +65,7 @@ async function route(req: IncomingMessage, res: ServerResponse) {
   if (url.pathname === "/splitit/execute" && req.method === "POST") {
     requireSecret(req, url);
     const payload = executeSchema.parse(JSON.parse(await readBody(req) || "{}"));
-    const result = await execute(payload);
+    const result = await executeSafely(payload);
     sendJson(res, 200, result);
     return;
   }
@@ -124,6 +124,27 @@ async function execute(payload: ExecutePayload) {
   };
 }
 
+async function executeSafely(payload: ExecutePayload) {
+  try {
+    return await execute(payload);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const session = sessions.get(payload.jobId);
+    if (session) {
+      session.status = "live";
+      session.updatedAt = new Date();
+      log(session, `Paused: ${message}`);
+    }
+    console.error(JSON.stringify({ jobId: payload.jobId, error: message }));
+    return {
+      status: "waiting",
+      sentMessages: [],
+      response: `Executor paused: ${message}`,
+      error: message
+    };
+  }
+}
+
 async function getOrCreateSession(payload: ExecutePayload) {
   const existing = sessions.get(payload.jobId);
   if (existing && existing.status === "live" && !existing.page.isClosed()) {
@@ -180,6 +201,16 @@ async function clickChatLauncher(session: Session) {
     }
   }
 
+  try {
+    const viewport = page.viewportSize() ?? { width: 1440, height: 1000 };
+    await page.mouse.click(viewport.width - 48, viewport.height - 48);
+    log(session, "Clicked bottom-right chat launcher fallback");
+    await page.waitForTimeout(2500);
+    return;
+  } catch {
+    // Keep trying iframe fallbacks.
+  }
+
   const frames = page.frames();
   for (const frame of frames) {
     try {
@@ -211,9 +242,12 @@ async function sendChatMessage(session: Session, message: string) {
 async function findChatInput(page: Page) {
   const selectors = [
     "textarea",
+    "textarea[placeholder*='message' i]",
     "input[type='text']",
+    "input[placeholder*='message' i]",
     "[contenteditable='true']",
-    "[role='textbox']"
+    "[role='textbox']",
+    "div[contenteditable='true']"
   ];
 
   for (const frame of page.frames()) {
