@@ -140,6 +140,7 @@ model ChannelWhopBusiness {
   slackChannelId String
   businessId     String
   businessName   String
+  apiKey         String   @default("")
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 

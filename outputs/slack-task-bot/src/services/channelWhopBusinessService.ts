@@ -4,7 +4,9 @@ export async function upsertChannelWhopBusiness(input: {
   slackChannelId: string;
   businessId: string;
   businessName: string;
+  apiKey?: string;
 }) {
+  const apiKey = input.apiKey?.trim();
   return prisma.channelWhopBusiness.upsert({
     where: {
       slackChannelId_businessId: {
@@ -12,11 +14,15 @@ export async function upsertChannelWhopBusiness(input: {
         businessId: input.businessId
       }
     },
-    update: { businessName: input.businessName },
+    update: {
+      businessName: input.businessName,
+      ...(apiKey ? { apiKey } : {})
+    },
     create: {
       slackChannelId: input.slackChannelId,
       businessId: input.businessId,
-      businessName: input.businessName
+      businessName: input.businessName,
+      apiKey: apiKey ?? ""
     }
   });
 }
