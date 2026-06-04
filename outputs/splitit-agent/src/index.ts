@@ -285,6 +285,55 @@ async function removeCookieBanner(session: Session) {
   await session.page.waitForTimeout(1000);
 }
 
+async function clearBottomCookieBlocker(session: Session) {
+  const viewport = session.page.viewportSize() ?? { width: 1440, height: 1000 };
+  await session.page.waitForTimeout(1000);
+  if (await cookieBannerVisible(session.page)) {
+    await humanDelay(session, "Clicking visible bottom cookie accept");
+    await session.page.mouse.click(Math.round(viewport.width * 0.82), viewport.height - 52);
+    await session.page.waitForTimeout(2500);
+  }
+
+  if (await cookieBannerVisible(session.page)) {
+    await removeBottomOverlayByGeometry(session);
+  }
+}
+
+async function removeBottomOverlayByGeometry(session: Session) {
+  log(session, "Removing bottom overlay by geometry fallback");
+  for (const frame of session.page.frames()) {
+    try {
+      await frame.evaluate(() => {
+        const removeBottomOverlays = (root: Document | ShadowRoot) => {
+          const elements = Array.from(root.querySelectorAll("*"));
+          for (const element of elements) {
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            const zIndex = Number.parseInt(style.zIndex || "0", 10);
+            const looksLikeBottomOverlay = (
+              rect.width > window.innerWidth * 0.75 &&
+              rect.height > 70 &&
+              rect.height < window.innerHeight * 0.35 &&
+              rect.bottom > window.innerHeight - 5 &&
+              (style.position === "fixed" || style.position === "sticky" || zIndex > 10)
+            );
+            if (looksLikeBottomOverlay) {
+              (element as HTMLElement).style.display = "none";
+              (element as HTMLElement).style.pointerEvents = "none";
+            }
+            const shadowRoot = (element as HTMLElement).shadowRoot;
+            if (shadowRoot) removeBottomOverlays(shadowRoot);
+          }
+        };
+        removeBottomOverlays(document);
+      });
+    } catch {
+      // Try the next frame.
+    }
+  }
+  await session.page.waitForTimeout(1000);
+}
+
 async function clickCookieAcceptByGeometry(session: Session) {
   await humanDelay(session, "Accepting cookie banner by geometry");
   for (const frame of session.page.frames()) {
@@ -367,7 +416,7 @@ async function clickChatLauncher(session: Session) {
 
 async function clickChatWithUsButton(session: Session) {
   await session.page.locator("text=Live chat").first().scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => undefined);
-  await acceptCookieBanner(session);
+  await clearBottomCookieBlocker(session);
   await humanDelay(session, "Clicking Chat with us button");
   if (await clickElementByText(session, /^chat with us$/i, "Chat with us button")) return;
 
@@ -388,7 +437,7 @@ async function clickBottomRightLauncher(session: Session, label: string) {
 async function waitForChatReady(session: Session) {
   if (await waitUntilChatInputVisible(session.page, 20_000)) return;
   if (await cookieBannerVisible(session.page)) {
-    await acceptCookieBanner(session);
+    await clearBottomCookieBlocker(session);
     await clickChatWithUsButton(session);
     if (await waitUntilChatInputVisible(session.page, 20_000)) return;
   }
