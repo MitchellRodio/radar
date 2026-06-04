@@ -183,7 +183,7 @@ async function getOrCreateSession(payload: ExecutePayload) {
 async function clickChatLauncher(session: Session) {
   const page = session.page;
   await clickBottomRightLauncher(session, "initial bottom-right launcher");
-  if (await chatInputExists(page, 8000)) return;
+  if (await waitUntilChatOpened(page, 7000)) return;
 
   const selectors = [
     "button[aria-label*='chat' i]",
@@ -206,7 +206,7 @@ async function clickChatLauncher(session: Session) {
       await locator.click({ timeout: 4000 });
       log(session, `Clicked chat launcher: ${selector}`);
       await page.waitForTimeout(4000);
-      if (await chatInputExists(page, 5000)) return;
+      if (await waitUntilChatOpened(page, 7000)) return;
       log(session, `Launcher selector did not open an input: ${selector}`);
     } catch {
       // Try the next common chat selector.
@@ -214,7 +214,7 @@ async function clickChatLauncher(session: Session) {
   }
 
   await clickBottomRightLauncher(session, "bottom-right launcher fallback");
-  if (await chatInputExists(page, 5000)) return;
+  if (await waitUntilChatOpened(page, 7000)) return;
 
   const frames = page.frames();
   for (const frame of frames) {
@@ -255,17 +255,72 @@ async function sendChatMessage(session: Session, message: string) {
   session.updatedAt = new Date();
 }
 
-async function chatInputExists(page: Page, timeoutMs: number) {
+async function chatInputExists(page: Page) {
+  const selectors = [
+    "textarea",
+    "textarea[placeholder*='message' i]",
+    "input[type='text']",
+    "input[placeholder*='message' i]",
+    "[contenteditable='true']",
+    "[role='textbox']",
+    "div[contenteditable='true']"
+  ];
+
   try {
-    await findChatInputWithTimeout(page, timeoutMs);
-    return true;
+    for (const frame of page.frames()) {
+      for (const selector of selectors) {
+        if (await frame.locator(selector).last().isVisible({ timeout: 250 }).catch(() => false)) return true;
+      }
+    }
+    return false;
   } catch {
     return false;
   }
 }
 
+async function chatPromptVisible(page: Page) {
+  try {
+    const text = await collectVisibleText(page);
+    return /type a message|splitit support|how can i assist/i.test(text);
+  } catch {
+    return false;
+  }
+}
+
+async function chatOpened(page: Page) {
+  try {
+    if (await chatInputExists(page)) return true;
+    return chatPromptVisible(page);
+  } catch {
+    return false;
+  }
+}
+
+async function chatInputRequired(page: Page, timeoutMs: number) {
+  const startedAt = Date.now();
+  do {
+    try {
+      return await findChatInputWithTimeout(page, 700);
+    } catch {
+      await page.waitForTimeout(700);
+    }
+  } while (Date.now() - startedAt < timeoutMs);
+
+  throw new Error("Could not find Splitit chat input.");
+}
+
+async function waitUntilChatOpened(page: Page, timeoutMs: number) {
+  const startedAt = Date.now();
+  do {
+    if (await chatOpened(page)) return true;
+    await page.waitForTimeout(1000);
+  } while (Date.now() - startedAt < timeoutMs);
+
+  return false;
+}
+
 async function findChatInput(page: Page) {
-  return findChatInputWithTimeout(page, 3000);
+  return chatInputRequired(page, 20_000);
 }
 
 async function findChatInputWithTimeout(page: Page, timeoutMs: number) {
