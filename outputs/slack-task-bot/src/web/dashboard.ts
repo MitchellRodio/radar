@@ -7,7 +7,7 @@ import { formatDate, parseDueDate } from "../lib/dates";
 import { logger } from "../lib/logger";
 import { canManageRequest, isAdmin } from "../lib/permissions";
 import { prisma } from "../lib/prisma";
-import { getOpenAiSettingsStatus, getSplititAgentSettingsStatus, saveOpenAiSettings, saveSplititAgentSettings } from "../services/appSettingsService";
+import { getOpenAiSettingsStatus, getSplititAgentSettings, getSplititAgentSettingsStatus, saveOpenAiSettings, saveSplititAgentSettings } from "../services/appSettingsService";
 import { mapChannelOwner } from "../services/channelOwnerService";
 import {
   addInternalNote,
@@ -168,6 +168,28 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     const result = jobId ? await sendManualSplititMessage(jobId, actorSlackUserId, message) : { error: "Missing Splitit job.", job: null };
     const notice = result.error ? result.error : "Manual message sent";
     redirect(res, `/dashboard/splitit?job=${encodeURIComponent(jobId)}&notice=${encodeURIComponent(notice)}`);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/dashboard/splitit/delete") {
+    const body = await readForm(req);
+    const jobId = (body.get("jobId") ?? "").trim();
+    if (jobId) await prisma.splititAutomationJob.deleteMany({ where: { id: jobId } });
+    redirect(res, "/dashboard/splitit?notice=Splitit chat deleted");
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/dashboard/splitit/clear-off") {
+    await prisma.splititAutomationJob.deleteMany({
+      where: { status: { in: ["DONE", "BLOCKED", "FAILED"] } }
+    });
+    redirect(res, "/dashboard/splitit?notice=Off Splitit chats cleared");
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/dashboard/splitit/clear-all") {
+    await prisma.splititAutomationJob.deleteMany({});
+    redirect(res, "/dashboard/splitit?notice=All Splitit chats cleared");
     return;
   }
 
@@ -792,11 +814,12 @@ async function renderSettings(res: ServerResponse, notice: string) {
 }
 
 async function renderSplitit(res: ServerResponse, notice: string, selectedJobId: string) {
-  const jobs = await loadSplititJobs();
+  const [jobs, splititSettings] = await Promise.all([loadSplititJobs(), getSplititAgentSettings()]);
   const selectedJob = selectedJobId
     ? jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null
     : jobs[0] ?? null;
   const liveJobs = jobs.filter((job) => isLiveSplititJob(job.status)).length;
+  const browserViewUrl = selectedJob ? splititBrowserViewUrl(splititSettings.webhookUrl, splititSettings.webhookSecret, selectedJob.id) : "";
 
   sendHtml(
     res,
@@ -811,7 +834,15 @@ async function renderSplitit(res: ServerResponse, notice: string, selectedJobId:
           <h1>Live Splitit chats</h1>
           <p class="muted">Watch concurrent Splitit whitelist sessions, review the full transcript, and manually send a message when you need to take over.</p>
         </div>
-        <a class="button-link secondary" href="/dashboard/settings">Agent settings</a>
+        <div class="hero-actions">
+          <form method="post" action="/dashboard/splitit/clear-off">
+            <button type="submit" class="secondary-button">Clear off agents</button>
+          </form>
+          <form method="post" action="/dashboard/splitit/clear-all">
+            <button type="submit" class="danger-button">Clear all</button>
+          </form>
+          <a class="button-link secondary" href="/dashboard/settings">Agent settings</a>
+        </div>
       </section>
       ${notice ? `<div class="notice">${escapeHtml(notice)}</div>` : ""}
       <section class="stat-grid splitit-stats">
@@ -830,7 +861,7 @@ async function renderSplitit(res: ServerResponse, notice: string, selectedJobId:
           </div>
         </div>
         <div class="panel splitit-detail">
-          ${selectedJob ? splititJobDetail(selectedJob) : `<p class="muted">Queue a Splitit agent from a Splitit whitelist request to see it here.</p>`}
+          ${selectedJob ? splititJobDetail(selectedJob, browserViewUrl) : `<p class="muted">Queue a Splitit agent from a Splitit whitelist request to see it here.</p>`}
         </div>
       </section>
       `
@@ -896,7 +927,7 @@ function splititJobCard(job: Awaited<ReturnType<typeof loadSplititJobs>>[number]
   `;
 }
 
-function splititJobDetail(job: Awaited<ReturnType<typeof loadSplititJobs>>[number]) {
+function splititJobDetail(job: Awaited<ReturnType<typeof loadSplititJobs>>[number], browserViewUrl: string) {
   const live = isLiveSplititJob(job.status);
   const company = job.request.channel?.companyName ?? job.request.channel?.name ?? job.request.channelId;
   return `
@@ -905,7 +936,14 @@ function splititJobDetail(job: Awaited<ReturnType<typeof loadSplititJobs>>[numbe
         <h2>${escapeHtml(job.targetEmail)}</h2>
         <span class="muted">${escapeHtml(company)} | Request ${job.requestId}</span>
       </div>
-      <span class="agent-state ${live ? "live" : "off"}"><span class="agent-light ${live ? "live" : "off"}"></span>${live ? "Live agent" : "Agent off"}</span>
+      <div class="detail-actions">
+        ${live && browserViewUrl ? `<a class="button-link small" target="_blank" rel="noreferrer" href="${escapeHtml(browserViewUrl)}">Open live browser</a>` : ""}
+        <form method="post" action="/dashboard/splitit/delete">
+          <input type="hidden" name="jobId" value="${escapeHtml(job.id)}" />
+          <button type="submit" class="danger-button small">Delete</button>
+        </form>
+        <span class="agent-state ${live ? "live" : "off"}"><span class="agent-light ${live ? "live" : "off"}"></span>${live ? "Live agent" : "Agent off"}</span>
+      </div>
     </div>
     <div class="splitit-meta">
       <span><strong>Status</strong>${escapeHtml(splititStatusLabel(job.status))}</span>
@@ -928,6 +966,19 @@ function splititJobDetail(job: Awaited<ReturnType<typeof loadSplititJobs>>[numbe
       <button type="submit" ${live ? "" : "disabled"}>Send message</button>
     </form>
   `;
+}
+
+function splititBrowserViewUrl(webhookUrl: string, webhookSecret: string, jobId: string) {
+  if (!webhookUrl) return "";
+  try {
+    const url = new URL(webhookUrl);
+    url.pathname = `/sessions/${encodeURIComponent(jobId)}`;
+    url.search = "";
+    if (webhookSecret) url.searchParams.set("secret", webhookSecret);
+    return url.toString();
+  } catch {
+    return "";
+  }
 }
 
 function splititMessageBubble(message: Awaited<ReturnType<typeof loadSplititJobs>>[number]["messages"][number]) {
@@ -1378,6 +1429,7 @@ function css() {
     .button-link { display: inline-flex; align-items: center; min-height: 38px; border-radius: 8px; padding: 8px 14px; background: var(--blue); color: white; text-decoration: none; font-weight: 700; }
     .button-link.small { min-height: 32px; padding: 6px 11px; font-size: 13px; }
     .button-link.secondary { background: #f1f3f4; color: #3c4043; }
+    .hero-actions, .detail-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
     .eyebrow { color: var(--blue); font-weight: 700; margin: 0 0 8px; text-transform: uppercase; font-size: 12px; letter-spacing: 0; }
     h1, h2, h3 { margin: 0; letter-spacing: 0; }
     h1 { font-size: 34px; line-height: 1.12; font-weight: 750; }
@@ -1401,6 +1453,11 @@ function css() {
     textarea { resize: vertical; line-height: 1.45; }
     button { min-height: 38px; border: 0; border-radius: 8px; padding: 8px 14px; background: var(--blue); color: white; font-weight: 700; cursor: pointer; box-shadow: 0 1px 1px rgba(60, 64, 67, .18); }
     button:hover { background: var(--blue-dark); }
+    button.secondary-button { background: #f1f3f4; color: #3c4043; }
+    button.secondary-button:hover { background: #e8eaed; }
+    button.danger-button { background: #fce8e6; color: var(--red); }
+    button.danger-button:hover { background: #fad2cf; }
+    button.small { min-height: 32px; padding: 6px 11px; font-size: 13px; }
     button:disabled, textarea:disabled, input:disabled { opacity: .55; cursor: not-allowed; }
     .stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; align-items: center; }
     .stat-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 16px; margin-bottom: 16px; }

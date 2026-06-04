@@ -345,3 +345,31 @@ or:
 If no executor webhook is configured, the job blocks cleanly and DMs the owner with the exact script that is ready to send.
 
 The `/dashboard/splitit` page shows all Splitit automation chats, records every agent/Splitit/CSM/system message, and lets an admin manually send a message into a live chat through the executor webhook.
+It also includes cleanup controls to delete one chat, clear off/done agents, or clear all Splitit chat records.
+
+## Splitit Browser Executor
+
+The companion browser executor lives in `outputs/splitit-agent`.
+
+It is a Playwright service that:
+
+- opens `https://splitit.com`
+- clicks the bottom-right chat launcher
+- waits for the chat prompt to appear/change
+- sends each `conversationPlan` value one at a time
+- keeps a persistent browser profile under `/data`
+- exposes `/sessions/:jobId` so a live Chromium session can be watched from the dashboard
+
+Deploy it as a separate Render web service with:
+
+- root directory: `outputs/splitit-agent`
+- Dockerfile: `Dockerfile`
+- env var: `SPLITIT_AGENT_SECRET`
+- persistent disk mounted at `/data`
+
+After deploying, set the Radar dashboard Splitit agent settings to:
+
+```text
+Executor webhook URL: https://your-splitit-agent-service.onrender.com/splitit/execute
+Webhook secret: same value as SPLITIT_AGENT_SECRET
+```

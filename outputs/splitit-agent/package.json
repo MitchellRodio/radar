@@ -1,0 +1,19 @@
+{
+  "name": "splitit-browser-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser executor for Radar Splitit whitelist automation.",
+  "main": "dist/src/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/src/index.js"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

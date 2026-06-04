@@ -1,0 +1,348 @@
+import { createServer, IncomingMessage, ServerResponse } from "http";
+import { chromium, BrowserContext, Page } from "playwright";
+import { z } from "zod";
+
+const config = {
+  port: Number(process.env.PORT ?? 3000),
+  secret: process.env.SPLITIT_AGENT_SECRET ?? "",
+  userDataDir: process.env.SPLITIT_AGENT_USER_DATA_DIR ?? "/data/splitit-browser",
+  headless: (process.env.SPLITIT_AGENT_HEADLESS ?? "true") !== "false"
+};
+
+const executeSchema = z.object({
+  jobId: z.string().min(1),
+  requestId: z.number().optional(),
+  targetEmail: z.string().optional(),
+  splititUrl: z.string().default("https://splitit.com"),
+  action: z.enum(["run_script", "manual_message"]).default("run_script"),
+  message: z.string().optional(),
+  conversationPlan: z.array(z.object({
+    step: z.string(),
+    waitFor: z.string(),
+    send: z.string()
+  })).default([]),
+  messages: z.array(z.string()).default([])
+});
+
+type ExecutePayload = z.infer<typeof executeSchema>;
+
+type Session = {
+  jobId: string;
+  context: BrowserContext;
+  page: Page;
+  status: "live" | "done" | "blocked";
+  lastResponse: string;
+  sentMessages: string[];
+  events: string[];
+  updatedAt: Date;
+};
+
+const sessions = new Map<string, Session>();
+
+const server = createServer(async (req, res) => {
+  try {
+    await route(req, res);
+  } catch (error) {
+    sendJson(res, 500, {
+      status: "failed",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+server.listen(config.port, () => {
+  console.log(`Splitit browser agent listening on ${config.port}`);
+});
+
+async function route(req: IncomingMessage, res: ServerResponse) {
+  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+
+  if (url.pathname === "/health") {
+    sendText(res, 200, "ok");
+    return;
+  }
+
+  if (url.pathname === "/splitit/execute" && req.method === "POST") {
+    requireSecret(req, url);
+    const payload = executeSchema.parse(JSON.parse(await readBody(req) || "{}"));
+    const result = await execute(payload);
+    sendJson(res, 200, result);
+    return;
+  }
+
+  const sessionMatch = url.pathname.match(/^\/sessions\/([^/]+)$/);
+  if (sessionMatch && req.method === "GET") {
+    requireSecret(req, url);
+    renderSession(res, decodeURIComponent(sessionMatch[1]));
+    return;
+  }
+
+  const screenshotMatch = url.pathname.match(/^\/sessions\/([^/]+)\/screenshot$/);
+  if (screenshotMatch && req.method === "GET") {
+    requireSecret(req, url);
+    await renderScreenshot(res, decodeURIComponent(screenshotMatch[1]));
+    return;
+  }
+
+  sendText(res, 404, "Not found");
+}
+
+async function execute(payload: ExecutePayload) {
+  const session = await getOrCreateSession(payload);
+
+  if (payload.action === "manual_message") {
+    if (!payload.message?.trim()) return { status: "blocked", error: "Manual message is blank." };
+    await sendChatMessage(session, payload.message.trim());
+    const response = await waitForLatestSplititResponse(session);
+    return {
+      status: "waiting",
+      sentMessages: [payload.message.trim()],
+      response
+    };
+  }
+
+  const plan = payload.conversationPlan.length
+    ? payload.conversationPlan
+    : payload.messages.map((message, index) => ({ step: `STEP_${index + 1}`, waitFor: "next Splitit prompt", send: message }));
+
+  const sentMessages: string[] = [];
+  for (const step of plan) {
+    log(session, `Waiting: ${step.waitFor}`);
+    await waitForChatReady(session);
+    await waitForLatestSplititResponse(session);
+    await sendChatMessage(session, step.send);
+    sentMessages.push(step.send);
+    log(session, `Sent ${step.step}: ${step.send}`);
+    await waitForLatestSplititResponse(session);
+  }
+
+  const response = await waitForLatestSplititResponse(session);
+  return {
+    status: responseLooksDone(response) ? "done" : "waiting",
+    sentMessages,
+    response
+  };
+}
+
+async function getOrCreateSession(payload: ExecutePayload) {
+  const existing = sessions.get(payload.jobId);
+  if (existing && existing.status === "live" && !existing.page.isClosed()) {
+    existing.updatedAt = new Date();
+    return existing;
+  }
+
+  const context = await chromium.launchPersistentContext(`${config.userDataDir}/${payload.jobId}`, {
+    headless: config.headless,
+    viewport: { width: 1440, height: 1000 }
+  });
+  const page = context.pages()[0] ?? await context.newPage();
+  const session: Session = {
+    jobId: payload.jobId,
+    context,
+    page,
+    status: "live",
+    lastResponse: "",
+    sentMessages: [],
+    events: [],
+    updatedAt: new Date()
+  };
+  sessions.set(payload.jobId, session);
+
+  log(session, `Opening ${payload.splititUrl}`);
+  await page.goto(payload.splititUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
+  await clickChatLauncher(session);
+  return session;
+}
+
+async function clickChatLauncher(session: Session) {
+  const page = session.page;
+  const selectors = [
+    "button[aria-label*='chat' i]",
+    "button[aria-label*='message' i]",
+    "[role='button'][aria-label*='chat' i]",
+    "iframe[title*='chat' i]",
+    ".intercom-launcher",
+    "#intercom-container button",
+    "[class*='chat'] button",
+    "[class*='launcher']"
+  ];
+
+  for (const selector of selectors) {
+    const locator = page.locator(selector).first();
+    try {
+      await locator.waitFor({ state: "visible", timeout: 4000 });
+      await locator.click({ timeout: 4000 });
+      log(session, `Clicked chat launcher: ${selector}`);
+      await page.waitForTimeout(1500);
+      return;
+    } catch {
+      // Try the next common chat selector.
+    }
+  }
+
+  const frames = page.frames();
+  for (const frame of frames) {
+    try {
+      const button = frame.locator("button, [role='button']").first();
+      await button.click({ timeout: 3000 });
+      log(session, "Clicked chat launcher inside iframe");
+      await page.waitForTimeout(1500);
+      return;
+    } catch {
+      // Try the next frame.
+    }
+  }
+
+  throw new Error("Could not find Splitit chat launcher.");
+}
+
+async function waitForChatReady(session: Session) {
+  await waitForLatestSplititResponse(session, 20_000);
+}
+
+async function sendChatMessage(session: Session, message: string) {
+  const target = await findChatInput(session.page);
+  await target.fill(message);
+  await target.press("Enter");
+  session.sentMessages.push(message);
+  session.updatedAt = new Date();
+}
+
+async function findChatInput(page: Page) {
+  const selectors = [
+    "textarea",
+    "input[type='text']",
+    "[contenteditable='true']",
+    "[role='textbox']"
+  ];
+
+  for (const frame of page.frames()) {
+    for (const selector of selectors) {
+      const locator = frame.locator(selector).last();
+      try {
+        await locator.waitFor({ state: "visible", timeout: 3000 });
+        return locator;
+      } catch {
+        // Keep searching.
+      }
+    }
+  }
+
+  throw new Error("Could not find Splitit chat input.");
+}
+
+async function waitForLatestSplititResponse(session: Session, timeoutMs = 30_000) {
+  const startedAt = Date.now();
+  const before = session.lastResponse;
+  let latest = before;
+
+  do {
+    await session.page.waitForTimeout(1200);
+    const text = await collectVisibleText(session.page);
+    latest = text.split("\n").map((line) => line.trim()).filter(Boolean).slice(-8).join(" | ");
+    if (latest && latest !== before) break;
+  } while (Date.now() - startedAt < timeoutMs);
+
+  session.lastResponse = latest || session.lastResponse;
+  session.updatedAt = new Date();
+  log(session, `Latest response: ${session.lastResponse || "none"}`);
+  return session.lastResponse || "Waiting for Splitit response.";
+}
+
+async function collectVisibleText(page: Page) {
+  const chunks: string[] = [];
+  for (const frame of page.frames()) {
+    try {
+      const text = await frame.locator("body").innerText({ timeout: 1000 });
+      if (text) chunks.push(text);
+    } catch {
+      // Some frames are not readable.
+    }
+  }
+  return chunks.join("\n");
+}
+
+function responseLooksDone(response: string) {
+  return /whitelist(ed)?|done|completed|success|approved/i.test(response);
+}
+
+function renderSession(res: ServerResponse, jobId: string) {
+  const session = sessions.get(jobId);
+  if (!session) {
+    sendText(res, 404, "Session not found or no longer live.");
+    return;
+  }
+
+  sendHtml(res, 200, `<!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta http-equiv="refresh" content="3" />
+        <title>Splitit session ${escapeHtml(jobId)}</title>
+        <style>
+          body { margin: 0; font-family: Inter, system-ui, sans-serif; background: #f8fafd; color: #202124; }
+          main { padding: 16px; display: grid; gap: 12px; }
+          img { width: 100%; border: 1px solid #dadce0; border-radius: 8px; background: white; }
+          pre { white-space: pre-wrap; background: white; border: 1px solid #dadce0; border-radius: 8px; padding: 12px; }
+        </style>
+      </head>
+      <body>
+        <main>
+          <h1>Splitit session ${escapeHtml(jobId)}</h1>
+          <img src="/sessions/${encodeURIComponent(jobId)}/screenshot?secret=${encodeURIComponent(config.secret)}&t=${Date.now()}" />
+          <pre>${escapeHtml(session.events.slice(-25).join("\n"))}</pre>
+        </main>
+      </body>
+    </html>`);
+}
+
+async function renderScreenshot(res: ServerResponse, jobId: string) {
+  const session = sessions.get(jobId);
+  if (!session || session.page.isClosed()) {
+    sendText(res, 404, "Session not found or no longer live.");
+    return;
+  }
+
+  const image = await session.page.screenshot({ type: "png", fullPage: false });
+  res.writeHead(200, { "Content-Type": "image/png" });
+  res.end(image);
+}
+
+function log(session: Session, event: string) {
+  session.events.push(`${new Date().toISOString()} ${event}`);
+  session.events = session.events.slice(-100);
+}
+
+function requireSecret(req: IncomingMessage, url: URL) {
+  if (!config.secret) return;
+  const supplied = req.headers["x-splitit-agent-secret"] ?? url.searchParams.get("secret");
+  if (supplied !== config.secret) {
+    throw new Error("Unauthorized");
+  }
+}
+
+async function readBody(req: IncomingMessage) {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function sendText(res: ServerResponse, status: number, text: string) {
+  res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8" });
+  res.end(text);
+}
+
+function sendJson(res: ServerResponse, status: number, payload: unknown) {
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify(payload));
+}
+
+function sendHtml(res: ServerResponse, status: number, html: string) {
+  res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(html);
+}
+
+function escapeHtml(value: string) {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}

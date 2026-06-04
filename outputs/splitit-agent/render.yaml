@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: splitit-browser-agent
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: SPLITIT_AGENT_SECRET
+        sync: false
+      - key: PORT
+        value: "3000"
+    disk:
+      name: splitit-browser-agent-data
+      mountPath: /data
+      sizeGB: 1
