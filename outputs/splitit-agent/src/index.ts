@@ -175,9 +175,35 @@ async function getOrCreateSession(payload: ExecutePayload) {
   log(session, `Opening ${payload.splititUrl}`);
   await page.goto(payload.splititUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
   await page.waitForLoadState("networkidle", { timeout: 20_000 }).catch(() => undefined);
+  await acceptCookieBanner(session);
   await humanDelay(session, "Waiting before opening chat");
   await clickChatLauncher(session);
   return session;
+}
+
+async function acceptCookieBanner(session: Session) {
+  const selectors = [
+    "button:has-text('Accept all')",
+    "button:has-text('Accept All')",
+    "[role='button']:has-text('Accept all')",
+    "#onetrust-accept-btn-handler",
+    "[id*='accept'][id*='cookie' i]",
+    "[class*='accept'][class*='cookie' i]"
+  ];
+
+  for (const selector of selectors) {
+    const locator = session.page.locator(selector).first();
+    try {
+      await locator.waitFor({ state: "visible", timeout: 1500 });
+      await humanDelay(session, `Accepting cookie banner with ${selector}`);
+      await locator.click({ timeout: 3000 });
+      log(session, `Accepted cookie banner: ${selector}`);
+      await session.page.waitForTimeout(2500);
+      return;
+    } catch {
+      // Try the next common cookie accept selector.
+    }
+  }
 }
 
 async function clickChatLauncher(session: Session) {
