@@ -1,5 +1,6 @@
-import { ChannelWhopBusiness, InternalNote, Request, RequestType, RequestUpdate, User, Channel, SplititAutomationJob } from "@prisma/client";
+import { InternalNote, Request, RequestType, RequestUpdate, User, Channel, SplititAutomationJob } from "@prisma/client";
 import { formatDate } from "../lib/dates";
+import type { CheckoutProductOption } from "../services/checkoutLinkService";
 import { statusLabel, threadLink, typeLabel } from "./format";
 
 type RequestWithRelations = Request & {
@@ -135,7 +136,7 @@ export function requestDetailModal(request: RequestWithRelations) {
   };
 }
 
-export function checkoutLinkModal(request: RequestWithRelations, businesses: ChannelWhopBusiness[]) {
+export function checkoutLinkModal(request: RequestWithRelations, products: CheckoutProductOption[]) {
   const extracted = request.extractedFields as Record<string, unknown>;
   const initialAmount = parseAmountFromText(String(extracted.amount ?? "") || request.description);
   const initialSplititOnly = /splitit/i.test(request.description) || /splitit/i.test(String(extracted.paymentProvider ?? ""));
@@ -149,15 +150,15 @@ export function checkoutLinkModal(request: RequestWithRelations, businesses: Cha
     blocks: [
       {
         type: "input",
-        block_id: "business",
+        block_id: "product",
         element: {
           type: "static_select",
           action_id: "value",
-          placeholder: { type: "plain_text", text: "Choose business" },
-          options: businesses.slice(0, 100).map((business) => checkoutBusinessOption(business)),
-          ...(businesses.length === 1 ? { initial_option: checkoutBusinessOption(businesses[0]) } : {})
+          placeholder: { type: "plain_text", text: "Choose product" },
+          options: products.slice(0, 100).map((product) => checkoutProductOption(product)),
+          ...(products.length === 1 ? { initial_option: checkoutProductOption(products[0]) } : {})
         },
-        label: { type: "plain_text", text: "Whop business" }
+        label: { type: "plain_text", text: "Whop product" }
       },
       {
         type: "input",
@@ -343,10 +344,10 @@ function threadText(request: Request) {
   return `<${threadLink(request.channelId, request.threadTs)}|Open thread>`;
 }
 
-function checkoutBusinessOption(business: ChannelWhopBusiness) {
+function checkoutProductOption(product: CheckoutProductOption) {
   return {
-    text: { type: "plain_text", text: `${business.businessName}${business.apiKey ? "" : " (missing key)"}`.slice(0, 75) },
-    value: business.id
+    text: { type: "plain_text", text: `${product.businessName} - ${product.productTitle}`.slice(0, 75) },
+    value: product.value
   };
 }
 

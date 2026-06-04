@@ -8,10 +8,17 @@ type CheckoutBusiness = {
   apiKey: string;
 };
 
+export type CheckoutProductOption = {
+  value: string;
+  businessName: string;
+  productId: string;
+  productTitle: string;
+};
+
 type CreateCheckoutLinkInput = {
   requestId: number;
   actorSlackUserId: string;
-  businessMappingId: string;
+  productSelection: string;
   amount: number;
   title: string;
   description?: string;
@@ -28,10 +35,43 @@ export async function listCheckoutBusinessesForRequest(requestId: number) {
   });
 }
 
+export async function listCheckoutProductOptionsForRequest(requestId: number) {
+  const businesses = await listCheckoutBusinessesForRequest(requestId);
+  const options: CheckoutProductOption[] = [];
+  const errors: string[] = [];
+
+  for (const business of businesses) {
+    if (!business.apiKey) {
+      errors.push(`${business.businessName} is missing an API key.`);
+      continue;
+    }
+
+    try {
+      const products = await listWhopProducts(business);
+      products.forEach((product) => {
+        options.push({
+          value: encodeProductSelection(business.id, product.id),
+          businessName: business.businessName,
+          productId: product.id,
+          productTitle: product.title || product.id
+        });
+      });
+    } catch (error) {
+      logger.error({ error, businessId: business.businessId }, "Failed to list Whop products");
+      errors.push(`${business.businessName}: ${checkoutErrorMessage(error)}`);
+    }
+  }
+
+  return { options: options.slice(0, 100), errors };
+}
+
 export async function createCheckoutLink(input: CreateCheckoutLinkInput) {
+  const selection = decodeProductSelection(input.productSelection);
+  if (!selection) return { error: "Choose a product.", request: null, checkoutUrl: "" };
+
   const [request, business] = await Promise.all([
     prisma.request.findUnique({ where: { id: input.requestId } }),
-    prisma.channelWhopBusiness.findUnique({ where: { id: input.businessMappingId } })
+    prisma.channelWhopBusiness.findUnique({ where: { id: selection.businessMappingId } })
   ]);
 
   if (!request) return { error: "Request not found.", request: null, checkoutUrl: "" };
@@ -44,6 +84,7 @@ export async function createCheckoutLink(input: CreateCheckoutLinkInput) {
     const checkout = await callWhopCheckoutApi(business, {
       requestId: input.requestId,
       actorSlackUserId: input.actorSlackUserId,
+      productId: selection.productId,
       amount: input.amount,
       title: input.title,
       description: input.description,
@@ -79,7 +120,7 @@ export async function createCheckoutLink(input: CreateCheckoutLinkInput) {
 
 async function callWhopCheckoutApi(
   business: CheckoutBusiness,
-  input: Omit<CreateCheckoutLinkInput, "businessMappingId">
+  input: Omit<CreateCheckoutLinkInput, "productSelection"> & { productId: string }
 ) {
   const response = await fetch("https://api.whop.com/api/v1/checkout_configurations", {
     method: "POST",
@@ -97,6 +138,7 @@ async function callWhopCheckoutApi(
       },
       plan: {
         company_id: business.businessId,
+        product_id: input.productId,
         currency: "usd",
         plan_type: "one_time",
         release_method: "buy_now",
@@ -104,8 +146,6 @@ async function callWhopCheckoutApi(
         title: input.title.slice(0, 30),
         description: input.description?.slice(0, 1000) || null,
         initial_price: input.amount,
-        renewal_price: 0,
-        unlimited_stock: true,
         ...(input.splititOnly
           ? {
               payment_method_configuration: {
@@ -126,6 +166,36 @@ async function callWhopCheckoutApi(
   }
 
   return body;
+}
+
+async function listWhopProducts(business: CheckoutBusiness): Promise<Array<{ id: string; title?: string }>> {
+  const url = new URL("https://api.whop.com/api/v1/products");
+  url.searchParams.set("company_id", business.businessId);
+  url.searchParams.set("first", "100");
+
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${business.apiKey}`
+    }
+  });
+
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = typeof body?.message === "string" ? body.message : JSON.stringify(body);
+    throw new Error(`Whop returned HTTP ${response.status}: ${message}`);
+  }
+
+  return Array.isArray(body?.data) ? body.data : [];
+}
+
+function encodeProductSelection(businessMappingId: string, productId: string) {
+  return `${businessMappingId}:${productId}`;
+}
+
+function decodeProductSelection(value: string) {
+  const [businessMappingId, productId] = value.split(":");
+  if (!businessMappingId || !productId) return null;
+  return { businessMappingId, productId };
 }
 
 function normalizeWhopUrl(value: string) {

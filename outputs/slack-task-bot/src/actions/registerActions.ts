@@ -26,7 +26,7 @@ import {
   updateRequesterMessageReference
 } from "../services/requestService";
 import { queueSplititAutomation } from "../services/splititAutomationService";
-import { createCheckoutLink, listCheckoutBusinessesForRequest } from "../services/checkoutLinkService";
+import { createCheckoutLink, listCheckoutProductOptionsForRequest } from "../services/checkoutLinkService";
 
 export function registerActions(app: App) {
   app.action("request_view", async ({ ack, body, client, action }: any) => {
@@ -120,20 +120,23 @@ export function registerActions(app: App) {
     const actorSlackUserId = body.user.id;
     if (!requestId || !(await canManageRequest(actorSlackUserId, requestId))) return;
 
-    const [request, businesses] = await Promise.all([
+    const [request, productResult] = await Promise.all([
       getRequest(requestId),
-      listCheckoutBusinessesForRequest(requestId)
+      listCheckoutProductOptionsForRequest(requestId)
     ]);
 
     if (!request) return;
-    if (!businesses.length) {
-      await notifyActionFailure(client, actorSlackUserId, "No Whop businesses are mapped to this Slack channel yet. Add one in `/dashboard/whop`.");
+    if (!productResult.options.length) {
+      const errorText = productResult.errors.length
+        ? productResult.errors.join("\n")
+        : "No Whop products were found for the businesses mapped to this Slack channel.";
+      await notifyActionFailure(client, actorSlackUserId, `${errorText}\n\nAdd/check business API keys in /dashboard/whop.`);
       return;
     }
 
     await client.views.push({
       trigger_id: body.trigger_id,
-      view: checkoutLinkModal(request, businesses)
+      view: checkoutLinkModal(request, productResult.options)
     });
   });
 
@@ -257,14 +260,14 @@ export function registerActions(app: App) {
   app.view(/^checkout_link_create:/, async ({ ack, body, view, client }: any) => {
     const requestId = parseRequestId(view.callback_id.split(":")[1]);
     const actorSlackUserId = body.user.id;
-    const businessMappingId = modalSelectedValue(view, "business");
+    const productSelection = modalSelectedValue(view, "product");
     const amount = parseCheckoutAmount(modalValue(view, "amount"));
     const title = modalValue(view, "title").trim();
     const description = modalValue(view, "description").trim();
     const splititOnly = modalCheckboxSelected(view, "splititOnly", "splitit_only");
 
     const errors: Record<string, string> = {};
-    if (!businessMappingId) errors.business = "Choose the Whop business.";
+    if (!productSelection) errors.product = "Choose the Whop product.";
     if (!amount) errors.amount = "Enter a valid amount, like 2100 or 2.1k.";
     if (!title) errors.title = "Add a checkout title.";
 
@@ -286,7 +289,7 @@ export function registerActions(app: App) {
     const result = await createCheckoutLink({
       requestId,
       actorSlackUserId,
-      businessMappingId,
+      productSelection,
       amount,
       title,
       description,
