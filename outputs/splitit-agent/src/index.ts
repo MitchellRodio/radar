@@ -117,7 +117,8 @@ async function execute(payload: ExecutePayload) {
   }
 
   const sentMessages = await answerSplititPrompts(session, plan);
-  const response = await waitForLatestSplititResponse(session);
+  const response = await waitForWhitelistCompletion(session);
+  if (responseLooksDone(response)) await closeSession(session, "Splitit confirmed whitelist completion");
   return {
     status: responseLooksDone(response) ? "done" : "waiting",
     sentMessages,
@@ -146,9 +147,33 @@ async function answerSplititPrompts(session: Session, plan: ExecutePayload["conv
 
     const response = await waitForLatestSplititResponse(session);
     if (responseLooksDone(response)) break;
+    if (shouldWaitSilently(next.step, response)) {
+      log(session, `Entering observe-only mode after ${next.step}`);
+      break;
+    }
   }
 
   return sentMessages;
+}
+
+function shouldWaitSilently(step: string, response: string) {
+  if (step === "SENT_WHITELIST_REQUEST") return true;
+  if (step === "SENT_ESCALATION_CONFIRMATION") return true;
+  return /escalate|another agent|agent who can assist|transfer/i.test(response);
+}
+
+async function waitForWhitelistCompletion(session: Session, timeoutMs = 90_000) {
+  const startedAt = Date.now();
+  let latest = session.lastResponse;
+
+  do {
+    latest = await waitForLatestSplititResponse(session, 12_000);
+    if (responseLooksDone(latest)) return latest;
+    await session.page.waitForTimeout(10_000);
+  } while (Date.now() - startedAt < timeoutMs);
+
+  log(session, "No whitelist confirmation yet; staying waiting");
+  return latest || "Waiting for Splitit whitelist confirmation.";
 }
 
 function chooseSplititResponse(prompt: string, plan: ExecutePayload["conversationPlan"], sentMessages: string[]) {
@@ -770,7 +795,15 @@ function uniqueLines(lines: string[]) {
 }
 
 function responseLooksDone(response: string) {
-  return /whitelist(ed)?|done|completed|success|approved/i.test(response);
+  return /(whitelist(ed)?|allowlist(ed)?).{0,80}(complete|completed|done|success|successful|approved|processed|has been|is now)|(?:complete|completed|done|success|successful|approved|processed).{0,80}(whitelist(ed)?|allowlist(ed)?)|customer.{0,80}(whitelist(ed)?|allowlist(ed)?)/i.test(response);
+}
+
+async function closeSession(session: Session, reason: string) {
+  log(session, reason);
+  session.status = "done";
+  session.updatedAt = new Date();
+  await session.context.close().catch(() => undefined);
+  sessions.delete(session.jobId);
 }
 
 async function clickElementByText(session: Session, pattern: RegExp, label: string) {
