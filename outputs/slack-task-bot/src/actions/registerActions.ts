@@ -27,6 +27,7 @@ import {
 } from "../services/requestService";
 import { queueSplititAutomation } from "../services/splititAutomationService";
 import { createCheckoutLink, listCheckoutProductOptionsForRequest } from "../services/checkoutLinkService";
+import { lookupPaymentsForChannel, paymentLookupBlocks } from "../services/paymentLookupService";
 
 export function registerActions(app: App) {
   app.action("request_view", async ({ ack, body, client, action }: any) => {
@@ -147,11 +148,17 @@ export function registerActions(app: App) {
   app.view("request_create", async ({ ack, body, view, client }: any) => {
     const title = modalValue(view, "title").trim();
     const description = modalValue(view, "description").trim();
-    const type = modalSelectedValue(view, "type") as RequestType;
+    const customerEmail = modalValue(view, "customerEmail").trim();
+    const selectedType = modalSelectedValue(view, "type");
+    const type = selectedType as RequestType;
 
     const errors: Record<string, string> = {};
-    if (!title) errors.title = "Add a short title.";
-    if (!description) errors.description = "Add request details.";
+    if (selectedType !== "VIEW_PAYMENTS") {
+      if (!title) errors.title = "Add a short title.";
+      if (!description) errors.description = "Add request details.";
+    } else if (!extractEmail(`${customerEmail} ${title} ${description}`)) {
+      errors.customerEmail = "Add the customer email.";
+    }
 
     if (Object.keys(errors).length) {
       await ack({ response_action: "errors", errors });
@@ -164,6 +171,14 @@ export function registerActions(app: App) {
       const metadata = JSON.parse(view.private_metadata || "{}");
       const channelId = metadata.channelId;
       if (!channelId) throw new Error("Missing channel ID in request_create metadata");
+
+      if (selectedType === "VIEW_PAYMENTS") {
+        const email = extractEmail(`${customerEmail} ${title} ${description}`);
+        if (!email) return;
+        const lookup = await lookupPaymentsForChannel({ channelId, email });
+        await postPaymentLookup(client, channelId, body.user.id, lookup);
+        return;
+      }
 
       const request = await createRequestFromManualInput({
         title,
@@ -187,6 +202,13 @@ export function registerActions(app: App) {
       }
     } catch (error) {
       logger.error(error, "Failed to create request from modal");
+      try {
+        await client.chat.postEphemeral({
+          channel: JSON.parse(view.private_metadata || "{}").channelId,
+          user: body.user.id,
+          text: "Sorry, I could not complete that lookup."
+        });
+      } catch {}
     }
   });
 
@@ -430,6 +452,28 @@ function processingModal(title: string) {
       }
     ]
   };
+}
+
+async function postPaymentLookup(client: any, channelId: string, userId: string, lookup: Awaited<ReturnType<typeof lookupPaymentsForChannel>>) {
+  try {
+    await client.chat.postEphemeral({
+      channel: channelId,
+      user: userId,
+      text: `Payments for ${lookup.email}`,
+      blocks: paymentLookupBlocks(lookup)
+    });
+  } catch (error) {
+    logger.error(error, "Failed to post payment lookup ephemerally; sending DM fallback");
+    await client.chat.postMessage({
+      channel: userId,
+      text: `Payments for ${lookup.email}`,
+      blocks: paymentLookupBlocks(lookup)
+    });
+  }
+}
+
+function extractEmail(value: string) {
+  return value.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i)?.[0] ?? "";
 }
 
 async function postCheckoutLinkToRequester(client: any, request: any, actorSlackUserId: string, checkoutUrl: string, splititOnly: boolean) {

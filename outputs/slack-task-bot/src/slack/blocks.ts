@@ -246,6 +246,7 @@ export function requestCreateModal(input: { channelId: string; initialDescriptio
       {
         type: "input",
         block_id: "title",
+        optional: true,
         element: {
           type: "plain_text_input",
           action_id: "value",
@@ -256,6 +257,7 @@ export function requestCreateModal(input: { channelId: string; initialDescriptio
       {
         type: "input",
         block_id: "description",
+        optional: true,
         element: {
           type: "plain_text_input",
           action_id: "value",
@@ -264,6 +266,17 @@ export function requestCreateModal(input: { channelId: string; initialDescriptio
           placeholder: { type: "plain_text", text: "What does the customer need?" }
         },
         label: { type: "plain_text", text: "Request details" }
+      },
+      {
+        type: "input",
+        block_id: "customerEmail",
+        optional: true,
+        element: {
+          type: "plain_text_input",
+          action_id: "value",
+          placeholder: { type: "plain_text", text: "customer@example.com" }
+        },
+        label: { type: "plain_text", text: "Customer email" }
       },
       {
         type: "input",
@@ -281,7 +294,8 @@ export function requestCreateModal(input: { channelId: string; initialDescriptio
             requestTypeOption("KYC_KYB"),
             requestTypeOption("PAYMENT_ISSUE"),
             requestTypeOption("ACCOUNT_SETTINGS"),
-            requestTypeOption("OTHER")
+            requestTypeOption("OTHER"),
+            selfServeOption("VIEW_PAYMENTS", "View payments")
           ]
         },
         label: { type: "plain_text", text: "Request type" }
@@ -355,6 +369,13 @@ function requestTypeOption(type: RequestType) {
   return {
     text: { type: "plain_text", text: typeLabel(type) },
     value: type
+  };
+}
+
+function selfServeOption(value: string, label: string) {
+  return {
+    text: { type: "plain_text", text: label },
+    value
   };
 }
 
