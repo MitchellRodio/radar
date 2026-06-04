@@ -116,23 +116,80 @@ async function execute(payload: ExecutePayload) {
     };
   }
 
-  const sentMessages: string[] = [];
-  for (const step of plan) {
-    log(session, `Waiting: ${step.waitFor}`);
-    await waitForChatReady(session);
-    await humanDelay(session, `Preparing to send ${step.step}`);
-    await sendChatMessage(session, step.send);
-    sentMessages.push(step.send);
-    log(session, `Sent ${step.step}: ${step.send}`);
-    await waitForLatestSplititResponse(session);
-  }
-
+  const sentMessages = await answerSplititPrompts(session, plan);
   const response = await waitForLatestSplititResponse(session);
   return {
     status: responseLooksDone(response) ? "done" : "waiting",
     sentMessages,
     response
   };
+}
+
+async function answerSplititPrompts(session: Session, plan: ExecutePayload["conversationPlan"]) {
+  const sentMessages: string[] = [];
+  const maxTurns = Math.max(plan.length + 2, 6);
+
+  for (let turn = 0; turn < maxTurns; turn += 1) {
+    await waitForChatReady(session);
+    const prompt = await waitForLatestSplititResponse(session);
+    const next = chooseSplititResponse(prompt, plan, sentMessages);
+
+    if (!next) {
+      log(session, `No scripted answer matched prompt: ${prompt}`);
+      break;
+    }
+
+    await humanDelay(session, `Preparing to send ${next.step}`);
+    await sendChatMessage(session, next.send);
+    sentMessages.push(next.send);
+    log(session, `Sent ${next.step}: ${next.send}`);
+
+    const response = await waitForLatestSplititResponse(session);
+    if (responseLooksDone(response)) break;
+  }
+
+  return sentMessages;
+}
+
+function chooseSplititResponse(prompt: string, plan: ExecutePayload["conversationPlan"], sentMessages: string[]) {
+  const normalizedPrompt = prompt.toLowerCase();
+  const byStep = Object.fromEntries(plan.map((step) => [step.step, step]));
+  const name = byStep.SENT_NAME;
+  const role = byStep.SENT_ROLE;
+  const storeAndEmail = byStep.SENT_STORE_AND_EMAIL;
+  const whitelist = byStep.SENT_WHITELIST_REQUEST;
+  const wasSent = (step?: { send: string }) => Boolean(step && sentMessages.some((message) => message.includes(step.send)));
+
+  if (/(merchant|shopper|customer).{0,80}(confirm|whether|are you|you're|you are)|confirm.{0,80}(merchant|shopper|customer)/i.test(prompt)) {
+    if (role && !wasSent(role)) return role;
+  }
+
+  const asksName = /\b(name|speaking with|who am i|who are we chatting|who is chatting)\b/i.test(prompt);
+  const asksStore = /\b(store|business|company)\b/i.test(prompt);
+  const asksMerchantEmail = /\b(email|merchant account)\b/i.test(prompt);
+
+  if ((asksStore || asksMerchantEmail) && storeAndEmail && !wasSent(storeAndEmail)) {
+    if (asksName && name && !wasSent(name)) {
+      return {
+        step: "SENT_NAME_STORE_AND_EMAIL",
+        waitFor: "Splitit asks for name, store name, and merchant email",
+        send: `${name.send} ${storeAndEmail.send}`
+      };
+    }
+    return storeAndEmail;
+  }
+
+  if (asksName && name && !wasSent(name)) return name;
+
+  if (/(how can i assist|how can i help|what can i help|what do you need|assist you with|account today|support question)/i.test(prompt)) {
+    return wasSent(whitelist) ? undefined : whitelist;
+  }
+
+  if (/whitelist|risk|email to whitelist/i.test(prompt)) return wasSent(whitelist) ? undefined : whitelist;
+
+  if (!sentMessages.length && normalizedPrompt.includes("splitit support")) return name;
+
+  return undefined;
 }
 
 async function executeSafely(payload: ExecutePayload) {
