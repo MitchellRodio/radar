@@ -152,21 +152,35 @@ async function answerSplititPrompts(session: Session, plan: ExecutePayload["conv
 }
 
 function chooseSplititResponse(prompt: string, plan: ExecutePayload["conversationPlan"], sentMessages: string[]) {
-  const normalizedPrompt = prompt.toLowerCase();
+  const recentPrompt = prompt.split("|").map((line) => line.trim()).filter(Boolean).slice(-4).join(" | ");
+  const normalizedPrompt = recentPrompt.toLowerCase();
   const byStep = Object.fromEntries(plan.map((step) => [step.step, step]));
   const name = byStep.SENT_NAME;
   const role = byStep.SENT_ROLE;
   const storeAndEmail = byStep.SENT_STORE_AND_EMAIL;
   const whitelist = byStep.SENT_WHITELIST_REQUEST;
   const wasSent = (step?: { send: string }) => Boolean(step && sentMessages.some((message) => message.includes(step.send)));
+  const whitelistSent = wasSent(whitelist);
 
-  if (/(merchant|shopper|customer).{0,80}(confirm|whether|are you|you're|you are)|confirm.{0,80}(merchant|shopper|customer)/i.test(prompt)) {
+  if (/(escalate|another agent|agent who can assist|assist you further|would you like me to do that)/i.test(recentPrompt)) {
+    return sentMessages.includes("Yes")
+      ? undefined
+      : { step: "SENT_ESCALATION_CONFIRMATION", waitFor: "Splitit asks to escalate to another agent", send: "Yes" };
+  }
+
+  if (/unable to process.*(whitelist|blacklist)|cannot process.*(whitelist|blacklist)/i.test(recentPrompt)) {
+    return sentMessages.includes("Yes")
+      ? undefined
+      : { step: "SENT_ESCALATION_CONFIRMATION", waitFor: "Splitit asks to escalate to another agent", send: "Yes" };
+  }
+
+  if (/(merchant|shopper|customer).{0,80}(confirm|whether|are you|you're|you are)|confirm.{0,80}(merchant|shopper|customer)/i.test(recentPrompt)) {
     if (role && !wasSent(role)) return role;
   }
 
-  const asksName = /\b(name|speaking with|who am i|who are we chatting|who is chatting)\b/i.test(prompt);
-  const asksStore = /\b(store|business|company)\b/i.test(prompt);
-  const asksMerchantEmail = /\b(email|merchant account)\b/i.test(prompt);
+  const asksName = /\b(name|speaking with|who am i|who are we chatting|who is chatting)\b/i.test(recentPrompt);
+  const asksStore = /\b(store|business|company)\b/i.test(recentPrompt);
+  const asksMerchantEmail = /\b(email|merchant account)\b/i.test(recentPrompt);
 
   if ((asksStore || asksMerchantEmail) && storeAndEmail && !wasSent(storeAndEmail)) {
     if (asksName && name && !wasSent(name)) {
@@ -181,11 +195,11 @@ function chooseSplititResponse(prompt: string, plan: ExecutePayload["conversatio
 
   if (asksName && name && !wasSent(name)) return name;
 
-  if (/(how can i assist|how can i help|what can i help|what do you need|assist you with|account today|support question)/i.test(prompt)) {
-    return wasSent(whitelist) ? undefined : whitelist;
+  if (/(how can i assist|how can i help|what can i help|what do you need|assist you with|account today|support question)/i.test(recentPrompt)) {
+    return whitelistSent ? undefined : whitelist;
   }
 
-  if (/whitelist|risk|email to whitelist/i.test(prompt)) return wasSent(whitelist) ? undefined : whitelist;
+  if (/whitelist|risk|email to whitelist/i.test(recentPrompt)) return whitelistSent ? undefined : whitelist;
 
   if (!sentMessages.length && normalizedPrompt.includes("splitit support")) return name;
 
