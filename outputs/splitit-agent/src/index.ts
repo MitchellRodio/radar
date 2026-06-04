@@ -244,13 +244,8 @@ async function acceptCookieBanner(session: Session) {
 
   const visibleText = await collectVisibleText(session.page).catch(() => "");
   if (/our cookies|accept all/i.test(visibleText)) {
-    const viewport = session.page.viewportSize() ?? { width: 1440, height: 1000 };
-    await humanDelay(session, "Accepting cookie banner with coordinate fallback");
-    await session.page.mouse.click(viewport.width - 270, viewport.height - 52);
-    await session.page.waitForTimeout(1200);
-    await session.page.mouse.click(viewport.width - 270, viewport.height - 52);
-    log(session, "Accepted cookie banner with coordinate fallback");
-    await session.page.waitForTimeout(3000);
+    await clickCookieAcceptByGeometry(session);
+    if (!(await cookieBannerVisible(session.page))) return;
   }
 
   if (await cookieBannerVisible(session.page)) {
@@ -267,24 +262,20 @@ async function removeCookieBanner(session: Session) {
   for (const frame of session.page.frames()) {
     try {
       await frame.evaluate(() => {
-        const matchesCookieText = (element: Element) => /our cookies|manage cookies|accept all/i.test(element.textContent || "");
-        const candidates = Array.from(document.querySelectorAll("body *")).filter(matchesCookieText);
-        for (const candidate of candidates) {
-          let current: Element | null = candidate;
-          for (let depth = 0; current && depth < 6; depth += 1) {
-            const style = window.getComputedStyle(current);
-            const rect = current.getBoundingClientRect();
-            if (
-              (style.position === "fixed" || style.position === "sticky") &&
-              rect.width > window.innerWidth * 0.5 &&
-              rect.height > 80 &&
-              rect.bottom > window.innerHeight * 0.7
-            ) {
-              current.remove();
-              return;
-            }
-            current = current.parentElement;
-          }
+        const elements = Array.from(document.querySelectorAll("body *"));
+        const candidates = elements
+          .map((element) => ({ element, rect: element.getBoundingClientRect(), text: element.textContent || "" }))
+          .filter(({ rect, text }) => (
+            /our cookies|manage cookies|accept all/i.test(text) &&
+            rect.width > window.innerWidth * 0.45 &&
+            rect.height > 60 &&
+            rect.bottom > window.innerHeight * 0.65
+          ))
+          .sort((a, b) => (b.rect.width * b.rect.height) - (a.rect.width * a.rect.height));
+
+        if (candidates[0]) {
+          candidates[0].element.remove();
+          return;
         }
       });
     } catch {
@@ -292,6 +283,33 @@ async function removeCookieBanner(session: Session) {
     }
   }
   await session.page.waitForTimeout(1000);
+}
+
+async function clickCookieAcceptByGeometry(session: Session) {
+  await humanDelay(session, "Accepting cookie banner by geometry");
+  for (const frame of session.page.frames()) {
+    try {
+      const box = await frame.evaluate(() => {
+        const elements = Array.from(document.querySelectorAll("button, a, [role='button'], input[type='button'], input[type='submit'], span, div"));
+        const candidates = elements
+          .map((element) => {
+            const rect = element.getBoundingClientRect();
+            const text = ((element.textContent || (element as HTMLInputElement).value || "").trim()).replace(/\s+/g, " ");
+            return { text, x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+          })
+          .filter(({ text, width, height }) => /^accept all$/i.test(text) && width > 20 && height > 10);
+        return candidates[candidates.length - 1] ?? null;
+      });
+      if (!box) continue;
+
+      await session.page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      log(session, `Clicked cookie accept geometry at ${Math.round(box.x + box.width / 2)},${Math.round(box.y + box.height / 2)}`);
+      await session.page.waitForTimeout(3000);
+      return;
+    } catch {
+      // Try the next frame.
+    }
+  }
 }
 
 async function clickChatLauncher(session: Session) {
