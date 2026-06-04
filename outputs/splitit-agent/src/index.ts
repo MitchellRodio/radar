@@ -109,9 +109,6 @@ async function execute(payload: ExecutePayload) {
 
   if (!plan.length) {
     await waitForChatReady(session);
-    if (await cookieBannerVisible(session.page)) {
-      throw new Error("Cookie banner is still visible; chat is not usable.");
-    }
     return {
       status: "waiting",
       sentMessages: [],
