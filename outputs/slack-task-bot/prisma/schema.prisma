@@ -99,6 +99,7 @@ model Channel {
   requests Request[]
   ownerMapping ChannelOwnerMapping?
   members ChannelMember[]
+  whopBusinesses ChannelWhopBusiness[]
 }
 
 model ChannelMember {
@@ -132,6 +133,20 @@ model ChannelOwnerMapping {
 
   channel Channel @relation(fields: [slackChannelId], references: [slackChannelId], onDelete: Cascade)
   owner   User    @relation(fields: [ownerSlackUserId], references: [slackUserId], onDelete: Cascade)
+}
+
+model ChannelWhopBusiness {
+  id             String   @id @default(cuid())
+  slackChannelId String
+  businessId     String
+  businessName   String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  channel Channel @relation(fields: [slackChannelId], references: [slackChannelId], onDelete: Cascade)
+
+  @@unique([slackChannelId, businessId])
+  @@index([businessId])
 }
 
 model Request {

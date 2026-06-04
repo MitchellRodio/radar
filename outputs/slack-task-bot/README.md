@@ -91,12 +91,14 @@ Fill in:
 - `SLACK_APP_TOKEN`
 - `ADMIN_SLACK_USER_IDS`
 - `OPENAI_API_KEY` or save the key from `/dashboard/settings`
+- `WHOP_API_KEY` or save the key from `/dashboard/settings`
 
 Optional:
 
 - `OPENAI_MODEL` defaults to `gpt-5-nano`
 
 In Render, you can add `OPENAI_API_KEY` under the `whop-slack-task-bot` service's **Environment** tab, or paste the key into `/dashboard/settings`. Locally, put the same key in `.env`.
+Whop API keys can also be pasted into `/dashboard/settings`; channel-specific Whop business IDs are managed from `/dashboard/channels`.
 
 For Socket Mode local development:
 
@@ -288,6 +290,8 @@ The dashboard currently supports:
 - Viewing all known channels
 - Assigning channel ownership from each channel's synced member list
 - Uploading an OpenAI API key from the dashboard
+- Uploading a Whop API key from the dashboard
+- Mapping one or more Whop business IDs and names to a Slack channel
 - Configuring the Splitit agent executor webhook
 - Assigning channel-scoped member roles: `ADMIN`, `CSM`, `SALES_REP`, `REQUESTER`
 - Viewing basic open/total request counts per channel

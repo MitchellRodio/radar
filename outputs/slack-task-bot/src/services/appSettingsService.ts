@@ -3,6 +3,7 @@ import { prisma } from "../lib/prisma";
 
 const OPENAI_API_KEY = "OPENAI_API_KEY";
 const OPENAI_MODEL = "OPENAI_MODEL";
+const WHOP_API_KEY = "WHOP_API_KEY";
 const SPLITIT_AGENT_WEBHOOK_URL = "SPLITIT_AGENT_WEBHOOK_URL";
 const SPLITIT_AGENT_WEBHOOK_SECRET = "SPLITIT_AGENT_WEBHOOK_SECRET";
 
@@ -37,6 +38,31 @@ export async function getOpenAiSettingsStatus() {
   return {
     configured: Boolean(settings.apiKey),
     model: settings.model,
+    source: settings.source
+  };
+}
+
+export async function getWhopSettings() {
+  const setting = await prisma.appSetting.findUnique({ where: { key: WHOP_API_KEY } });
+
+  return {
+    apiKey: setting?.value || config.WHOP_API_KEY,
+    source: setting?.value ? "dashboard" : config.WHOP_API_KEY ? "environment" : "missing"
+  };
+}
+
+export async function saveWhopSettings(input: { apiKey?: string; clearApiKey?: boolean }) {
+  if (input.clearApiKey) {
+    await prisma.appSetting.deleteMany({ where: { key: WHOP_API_KEY } });
+  } else if (input.apiKey?.trim()) {
+    await upsertSetting(WHOP_API_KEY, input.apiKey.trim());
+  }
+}
+
+export async function getWhopSettingsStatus() {
+  const settings = await getWhopSettings();
+  return {
+    configured: Boolean(settings.apiKey),
     source: settings.source
   };
 }

@@ -7,8 +7,17 @@ import { formatDate, parseDueDate } from "../lib/dates";
 import { logger } from "../lib/logger";
 import { canManageRequest, isAdmin } from "../lib/permissions";
 import { prisma } from "../lib/prisma";
-import { getOpenAiSettingsStatus, getSplititAgentSettings, getSplititAgentSettingsStatus, saveOpenAiSettings, saveSplititAgentSettings } from "../services/appSettingsService";
+import {
+  getOpenAiSettingsStatus,
+  getSplititAgentSettings,
+  getSplititAgentSettingsStatus,
+  getWhopSettingsStatus,
+  saveOpenAiSettings,
+  saveSplititAgentSettings,
+  saveWhopSettings
+} from "../services/appSettingsService";
 import { mapChannelOwner } from "../services/channelOwnerService";
+import { deleteChannelWhopBusiness, upsertChannelWhopBusiness } from "../services/channelWhopBusinessService";
 import {
   addInternalNote,
   createRequestFromManualInput,
@@ -45,6 +54,7 @@ type DashboardChannel = {
   companyName: string | null;
   ownerSlackUserId: string | null;
   members: DashboardChannelMember[];
+  whopBusinesses: DashboardChannelWhopBusiness[];
   openRequests: number;
   totalRequests: number;
 };
@@ -57,6 +67,12 @@ type DashboardUser = {
 
 type DashboardChannelMember = DashboardUser & {
   channelRole: UserRole;
+};
+
+type DashboardChannelWhopBusiness = {
+  id: string;
+  businessId: string;
+  businessName: string;
 };
 
 export function startDashboardServer(port: number) {
@@ -149,6 +165,16 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/dashboard/settings/whop") {
+    const body = await readForm(req);
+    await saveWhopSettings({
+      apiKey: body.get("whopApiKey")?.toString(),
+      clearApiKey: body.get("clearWhopApiKey") === "on"
+    });
+    redirect(res, "/dashboard/settings?notice=Whop API settings updated");
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/dashboard/settings/splitit-agent") {
     const body = await readForm(req);
     await saveSplititAgentSettings({
@@ -224,6 +250,27 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       });
     }
     redirect(res, `/dashboard/channels?channel=${encodeURIComponent(channelId)}&notice=Channel owner updated`);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/dashboard/channel-whop-business") {
+    const body = await readForm(req);
+    const channelId = (body.get("channelId") ?? "").toString().trim();
+    const businessId = (body.get("businessId") ?? "").toString().trim();
+    const businessName = (body.get("businessName") ?? "").toString().trim();
+    if (channelId && businessId && businessName) {
+      await upsertChannelWhopBusiness({ slackChannelId: channelId, businessId, businessName });
+    }
+    redirect(res, `/dashboard/channels?channel=${encodeURIComponent(channelId)}&notice=Whop business mapping saved`);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/dashboard/channel-whop-business/delete") {
+    const body = await readForm(req);
+    const channelId = (body.get("channelId") ?? "").toString().trim();
+    const businessMappingId = (body.get("businessMappingId") ?? "").toString().trim();
+    if (businessMappingId) await deleteChannelWhopBusiness(businessMappingId);
+    redirect(res, `/dashboard/channels?channel=${encodeURIComponent(channelId)}&notice=Whop business mapping removed`);
     return;
   }
 
@@ -688,7 +735,7 @@ async function renderChannels(res: ServerResponse, notice: string, selectedChann
         <div>
           <p class="eyebrow">Workspace map</p>
           <h1>Channel ownership</h1>
-          <p class="muted">Sync Slack channels, then manage owners and roles inside the channel where those people actually work.</p>
+          <p class="muted">Sync Slack channels, then manage owners, roles, and Whop businesses inside each customer channel.</p>
         </div>
         <form method="post" action="/dashboard/sync">
           <button type="submit">Sync Slack channels</button>
@@ -706,6 +753,10 @@ async function renderChannels(res: ServerResponse, notice: string, selectedChann
             <span class="muted">channel operators</span>
           </div>
           <div>
+            <span class="stat">${channels.reduce((sum, channel) => sum + channel.whopBusinesses.length, 0)}</span>
+            <span class="muted">Whop businesses</span>
+          </div>
+          <div>
             <span class="stat">${channels.reduce((sum, channel) => sum + channel.openRequests, 0)}</span>
             <span class="muted">open requests</span>
           </div>
@@ -715,7 +766,7 @@ async function renderChannels(res: ServerResponse, notice: string, selectedChann
       <section class="panel">
         <div class="panel-head">
           <h2>Channels</h2>
-          <span class="muted">Open a channel to assign owner and member roles.</span>
+          <span class="muted">Open a channel to assign owner, member roles, and Whop biz IDs.</span>
         </div>
         <div class="table-wrap">
           <table>
@@ -725,6 +776,7 @@ async function renderChannels(res: ServerResponse, notice: string, selectedChann
                 <th>Slack ID</th>
                 <th>Owner</th>
                 <th>Members</th>
+                <th>Whop biz</th>
                 <th>Open</th>
                 <th>Total</th>
                 <th>Manage</th>
@@ -742,7 +794,7 @@ async function renderChannels(res: ServerResponse, notice: string, selectedChann
 }
 
 async function renderSettings(res: ServerResponse, notice: string) {
-  const [openAi, splititAgent] = await Promise.all([getOpenAiSettingsStatus(), getSplititAgentSettingsStatus()]);
+  const [openAi, whop, splititAgent] = await Promise.all([getOpenAiSettingsStatus(), getWhopSettingsStatus(), getSplititAgentSettingsStatus()]);
 
   sendHtml(
     res,
@@ -777,6 +829,22 @@ async function renderSettings(res: ServerResponse, notice: string) {
               <span>Clear dashboard-saved key</span>
             </label>
             <button type="submit">Save AI settings</button>
+          </form>
+        </div>
+        <div class="panel settings-note">
+          <div class="panel-head">
+            <h2>Whop API</h2>
+            <span class="pill ${whop.configured ? "ok" : ""}">${whop.configured ? `Configured via ${whop.source}` : "Not configured"}</span>
+          </div>
+          <form class="stack" method="post" action="/dashboard/settings/whop">
+            <label>API key
+              <input name="whopApiKey" type="password" placeholder="${whop.configured ? "Leave blank to keep current key" : "whop_..."}" />
+            </label>
+            <label class="check-row">
+              <input name="clearWhopApiKey" type="checkbox" />
+              <span>Clear dashboard-saved key</span>
+            </label>
+            <button type="submit">Save Whop API key</button>
           </form>
         </div>
         <div class="panel settings-note">
@@ -1008,6 +1076,7 @@ function channelRow(channel: DashboardChannel) {
       <td><code>${escapeHtml(channel.slackChannelId)}</code></td>
       <td>${owner ? `${escapeHtml(userLabel(owner))}<br /><span class="role-chip">${roleLabel(owner.channelRole)}</span>` : channel.ownerSlackUserId ? `<code>${escapeHtml(channel.ownerSlackUserId)}</code>` : `<span class="muted">Unassigned</span>`}</td>
       <td>${memberPreview(channel.members)}</td>
+      <td>${whopBusinessPreview(channel.whopBusinesses)}</td>
       <td>${channel.openRequests}</td>
       <td>${channel.totalRequests}</td>
       <td><a class="button-link small" href="/dashboard/channels?channel=${encodeURIComponent(channel.slackChannelId)}">Open</a></td>
@@ -1043,6 +1112,26 @@ function channelMemberPanel(channel: DashboardChannel) {
         <div class="panel subtle-panel">
           <h3>Role model</h3>
           <p class="muted">Roles here apply only inside this channel. Use CSM/admin for people who should manage requests. Sales reps and requesters cannot update tickets.</p>
+        </div>
+      </div>
+      <div class="grid">
+        <div class="panel subtle-panel">
+          <h3>Whop businesses</h3>
+          <p class="muted">Map one or more Whop businesses to this Slack channel. Checkout-link flows will use these names when a CSM needs to pick a business.</p>
+          <form class="stack" method="post" action="/dashboard/channel-whop-business">
+            <input type="hidden" name="channelId" value="${escapeHtml(channel.slackChannelId)}" />
+            <label>Business name
+              <input name="businessName" placeholder="Acme Studios" required />
+            </label>
+            <label>Business ID
+              <input name="businessId" placeholder="biz_..." required />
+            </label>
+            <button type="submit">Add business</button>
+          </form>
+        </div>
+        <div class="panel subtle-panel">
+          <h3>Mapped businesses</h3>
+          ${channel.whopBusinesses.length ? whopBusinessTable(channel) : `<p class="muted">No Whop businesses mapped yet.</p>`}
         </div>
       </div>
       <div class="table-wrap">
@@ -1092,6 +1181,44 @@ function memberPreview(members: DashboardChannelMember[]) {
   return `${preview}${extra}<br /><span class="muted">${members.length} member${members.length === 1 ? "" : "s"} | ${operators} operator${operators === 1 ? "" : "s"}</span>`;
 }
 
+function whopBusinessPreview(businesses: DashboardChannelWhopBusiness[]) {
+  if (!businesses.length) return `<span class="muted">None</span>`;
+  const preview = businesses.slice(0, 2).map((business) => escapeHtml(business.businessName)).join(", ");
+  const extra = businesses.length > 2 ? ` +${businesses.length - 2}` : "";
+  return `${preview}${extra}<br /><span class="muted">${businesses.length} mapped</span>`;
+}
+
+function whopBusinessTable(channel: DashboardChannel) {
+  return `
+    <div class="table-wrap compact-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Business</th>
+            <th>Biz ID</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${channel.whopBusinesses.map((business) => `
+            <tr>
+              <td><strong>${escapeHtml(business.businessName)}</strong></td>
+              <td><code>${escapeHtml(business.businessId)}</code></td>
+              <td>
+                <form method="post" action="/dashboard/channel-whop-business/delete">
+                  <input type="hidden" name="channelId" value="${escapeHtml(channel.slackChannelId)}" />
+                  <input type="hidden" name="businessMappingId" value="${escapeHtml(business.id)}" />
+                  <button class="danger-button small" type="submit">Remove</button>
+                </form>
+              </td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
 function channelOperatorCount(channels: DashboardChannel[]) {
   const operators = new Set<string>();
   channels.forEach((channel) => channel.members.forEach((member) => {
@@ -1120,6 +1247,9 @@ async function loadChannels(): Promise<DashboardChannel[]> {
       members: {
         include: { user: true },
         orderBy: { slackUserId: "asc" }
+      },
+      whopBusinesses: {
+        orderBy: [{ businessName: "asc" }, { businessId: "asc" }]
       }
     },
     orderBy: [{ companyName: "asc" }, { name: "asc" }, { slackChannelId: "asc" }]
@@ -1142,6 +1272,11 @@ async function loadChannels(): Promise<DashboardChannel[]> {
           name: member.user.name,
           role: member.user.role,
           channelRole: member.role
+        })),
+        whopBusinesses: channel.whopBusinesses.map((business) => ({
+          id: business.id,
+          businessId: business.businessId,
+          businessName: business.businessName
         })),
         openRequests,
         totalRequests
@@ -1455,7 +1590,7 @@ function css() {
     button.danger-button:hover { background: #fad2cf; }
     button.small { min-height: 32px; padding: 6px 11px; font-size: 13px; }
     button:disabled, textarea:disabled, input:disabled { opacity: .55; cursor: not-allowed; }
-    .stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; align-items: center; }
+    .stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; align-items: center; }
     .stat-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 16px; margin-bottom: 16px; }
     .stat-card { min-height: 106px; display: flex; flex-direction: column; justify-content: center; }
     .stat { display: block; font-size: 32px; font-weight: 750; margin-bottom: 4px; }
@@ -1496,6 +1631,8 @@ function css() {
     .bubble small { display: block; margin-top: 7px; color: var(--muted); font-size: 11px; }
     .manual-message { display: grid; gap: 10px; }
     .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+    .compact-table { margin-top: 6px; }
+    .compact-table table { min-width: 0; }
     table { width: 100%; border-collapse: collapse; min-width: 980px; }
     th, td { padding: 12px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
     th { background: #f8fafd; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0; font-weight: 700; }
