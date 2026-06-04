@@ -109,6 +109,9 @@ async function execute(payload: ExecutePayload) {
 
   if (!plan.length) {
     await waitForChatReady(session);
+    if (await cookieBannerVisible(session.page)) {
+      throw new Error("Cookie banner is still visible; chat is not usable.");
+    }
     return {
       status: "waiting",
       sentMessages: [],
@@ -192,8 +195,8 @@ async function getOrCreateSession(payload: ExecutePayload) {
 async function acceptCookieBanner(session: Session) {
   await session.page.waitForTimeout(2500);
 
-  if (await clickElementByText(session, /^accept all$/i, "cookie accept text")) {
-    await session.page.waitForTimeout(3000);
+  if (!(await cookieBannerVisible(session.page))) {
+    log(session, "Cookie banner not visible");
     return;
   }
 
@@ -214,7 +217,7 @@ async function acceptCookieBanner(session: Session) {
       await locator.click({ timeout: 3000 });
       log(session, `Accepted cookie banner: ${selector}`);
       await session.page.waitForTimeout(2500);
-      return;
+      if (!(await cookieBannerVisible(session.page))) return;
     } catch {
       // Try the next common cookie accept selector.
     }
@@ -232,7 +235,7 @@ async function acceptCookieBanner(session: Session) {
       if (clicked) {
         log(session, "Accepted cookie banner inside frame");
         await session.page.waitForTimeout(3000);
-        return;
+        if (!(await cookieBannerVisible(session.page))) return;
       }
     } catch {
       // Try the next frame.
@@ -248,6 +251,10 @@ async function acceptCookieBanner(session: Session) {
     await session.page.mouse.click(viewport.width - 270, viewport.height - 52);
     log(session, "Accepted cookie banner with coordinate fallback");
     await session.page.waitForTimeout(3000);
+  }
+
+  if (await cookieBannerVisible(session.page)) {
+    throw new Error("Cookie banner is still visible; cannot open Splitit chat yet.");
   }
 }
 
@@ -339,7 +346,7 @@ async function sendChatMessage(session: Session, message: string) {
 }
 
 async function chatInputExists(page: Page) {
-  const selectors = [
+  const chatFrameSelectors = [
     "textarea",
     "textarea[placeholder*='message' i]",
     "input[type='text']",
@@ -351,6 +358,17 @@ async function chatInputExists(page: Page) {
 
   try {
     for (const frame of page.frames()) {
+      const isMainFrame = frame === page.mainFrame();
+      const frameUrl = frame.url();
+      const isChatFrame = !isMainFrame && /chat|intercom|drift|zendesk|hubspot|salesiq|messenger|bot/i.test(frameUrl);
+      const selectors = isChatFrame
+        ? chatFrameSelectors
+        : [
+            "textarea[placeholder*='message' i]",
+            "input[placeholder*='message' i]",
+            "[role='textbox'][aria-label*='message' i]",
+            "[contenteditable='true'][aria-label*='message' i]"
+          ];
       for (const selector of selectors) {
         if (await frame.locator(selector).last().isVisible({ timeout: 250 }).catch(() => false)) return true;
       }
@@ -389,7 +407,7 @@ async function findChatInput(page: Page) {
 }
 
 async function findChatInputWithTimeout(page: Page, timeoutMs: number) {
-  const selectors = [
+  const chatFrameSelectors = [
     "textarea",
     "textarea[placeholder*='message' i]",
     "input[type='text']",
@@ -400,6 +418,17 @@ async function findChatInputWithTimeout(page: Page, timeoutMs: number) {
   ];
 
   for (const frame of page.frames()) {
+    const isMainFrame = frame === page.mainFrame();
+    const frameUrl = frame.url();
+    const isChatFrame = !isMainFrame && /chat|intercom|drift|zendesk|hubspot|salesiq|messenger|bot/i.test(frameUrl);
+    const selectors = isChatFrame
+      ? chatFrameSelectors
+      : [
+          "textarea[placeholder*='message' i]",
+          "input[placeholder*='message' i]",
+          "[role='textbox'][aria-label*='message' i]",
+          "[contenteditable='true'][aria-label*='message' i]"
+        ];
     for (const selector of selectors) {
       const locator = frame.locator(selector).last();
       try {
@@ -412,6 +441,15 @@ async function findChatInputWithTimeout(page: Page, timeoutMs: number) {
   }
 
   throw new Error("Could not find Splitit chat input.");
+}
+
+async function cookieBannerVisible(page: Page) {
+  try {
+    const text = await collectVisibleText(page);
+    return /our cookies|manage cookies|accept all/i.test(text);
+  } catch {
+    return false;
+  }
 }
 
 async function waitForLatestSplititResponse(session: Session, timeoutMs = 30_000) {
