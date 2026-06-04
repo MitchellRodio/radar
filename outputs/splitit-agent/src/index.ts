@@ -288,15 +288,10 @@ async function removeCookieBanner(session: Session) {
 async function clearBottomCookieBlocker(session: Session) {
   const viewport = session.page.viewportSize() ?? { width: 1440, height: 1000 };
   await session.page.waitForTimeout(1000);
-  if (await cookieBannerVisible(session.page)) {
-    await humanDelay(session, "Clicking visible bottom cookie accept");
-    await session.page.mouse.click(Math.round(viewport.width * 0.82), viewport.height - 52);
-    await session.page.waitForTimeout(2500);
-  }
-
-  if (await cookieBannerVisible(session.page)) {
-    await removeBottomOverlayByGeometry(session);
-  }
+  await humanDelay(session, "Clicking visible bottom cookie accept");
+  await session.page.mouse.click(Math.round(viewport.width * 0.82), viewport.height - 52);
+  await session.page.waitForTimeout(2500);
+  await removeBottomOverlayByGeometry(session);
 }
 
 async function removeBottomOverlayByGeometry(session: Session) {
@@ -315,7 +310,7 @@ async function removeBottomOverlayByGeometry(session: Session) {
               rect.height > 70 &&
               rect.height < window.innerHeight * 0.35 &&
               rect.bottom > window.innerHeight - 5 &&
-              (style.position === "fixed" || style.position === "sticky" || zIndex > 10)
+              (style.position === "fixed" || style.position === "sticky" || zIndex > 10 || /cookie|consent|privacy/i.test(element.textContent || ""))
             );
             if (looksLikeBottomOverlay) {
               (element as HTMLElement).style.display = "none";
