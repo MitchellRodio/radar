@@ -204,6 +204,15 @@ async function acceptCookieBanner(session: Session) {
       // Try the next common cookie accept selector.
     }
   }
+
+  const visibleText = await collectVisibleText(session.page).catch(() => "");
+  if (/our cookies|accept all/i.test(visibleText)) {
+    const viewport = session.page.viewportSize() ?? { width: 1440, height: 1000 };
+    await humanDelay(session, "Accepting cookie banner with coordinate fallback");
+    await session.page.mouse.click(viewport.width - 270, viewport.height - 52);
+    log(session, "Accepted cookie banner with coordinate fallback");
+    await session.page.waitForTimeout(3000);
+  }
 }
 
 async function clickChatLauncher(session: Session) {
