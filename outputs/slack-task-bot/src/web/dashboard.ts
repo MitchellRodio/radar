@@ -138,6 +138,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/dashboard/whop") {
+    await renderWhop(res, url.searchParams.get("notice") ?? "");
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/dashboard/splitit") {
     await renderSplitit(res, url.searchParams.get("notice") ?? "", url.searchParams.get("job") ?? "");
     return;
@@ -171,7 +176,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       apiKey: body.get("whopApiKey")?.toString(),
       clearApiKey: body.get("clearWhopApiKey") === "on"
     });
-    redirect(res, "/dashboard/settings?notice=Whop API settings updated");
+    redirect(res, safeReturnPath(body.get("returnTo")?.toString(), "/dashboard/whop?notice=Whop API settings updated"));
     return;
   }
 
@@ -261,7 +266,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     if (channelId && businessId && businessName) {
       await upsertChannelWhopBusiness({ slackChannelId: channelId, businessId, businessName });
     }
-    redirect(res, `/dashboard/channels?channel=${encodeURIComponent(channelId)}&notice=Whop business mapping saved`);
+    redirect(res, safeReturnPath(body.get("returnTo")?.toString(), `/dashboard/channels?channel=${encodeURIComponent(channelId)}&notice=Whop business mapping saved`));
     return;
   }
 
@@ -270,7 +275,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     const channelId = (body.get("channelId") ?? "").toString().trim();
     const businessMappingId = (body.get("businessMappingId") ?? "").toString().trim();
     if (businessMappingId) await deleteChannelWhopBusiness(businessMappingId);
-    redirect(res, `/dashboard/channels?channel=${encodeURIComponent(channelId)}&notice=Whop business mapping removed`);
+    redirect(res, safeReturnPath(body.get("returnTo")?.toString(), `/dashboard/channels?channel=${encodeURIComponent(channelId)}&notice=Whop business mapping removed`));
     return;
   }
 
@@ -877,6 +882,91 @@ async function renderSettings(res: ServerResponse, notice: string) {
   );
 }
 
+async function renderWhop(res: ServerResponse, notice: string) {
+  const [channels, whop] = await Promise.all([loadChannels(), getWhopSettingsStatus()]);
+  const mappedBusinessCount = channels.reduce((sum, channel) => sum + channel.whopBusinesses.length, 0);
+  const channelsWithBusinesses = channels.filter((channel) => channel.whopBusinesses.length > 0).length;
+
+  sendHtml(
+    res,
+    200,
+    page(
+      "Radar Whop",
+      `
+      ${nav("whop")}
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Checkout link setup</p>
+          <h1>Whop businesses</h1>
+          <p class="muted">Store the company API key, then map each customer Slack channel to one or more Whop business IDs.</p>
+        </div>
+        <form method="post" action="/dashboard/sync">
+          <button type="submit">Sync Slack channels</button>
+        </form>
+      </section>
+      ${notice ? `<div class="notice">${escapeHtml(notice)}</div>` : ""}
+      <section class="grid">
+        <div class="panel settings-note">
+          <div class="panel-head">
+            <h2>Company API key</h2>
+            <span class="pill ${whop.configured ? "ok" : ""}">${whop.configured ? `Configured via ${whop.source}` : "Not configured"}</span>
+          </div>
+          <form class="stack" method="post" action="/dashboard/settings/whop">
+            <input type="hidden" name="returnTo" value="/dashboard/whop?notice=Whop API key saved" />
+            <label>Whop API key
+              <input name="whopApiKey" type="password" placeholder="${whop.configured ? "Leave blank to keep current key" : "Paste Whop API key"}" />
+            </label>
+            <label class="check-row">
+              <input name="clearWhopApiKey" type="checkbox" />
+              <span>Clear dashboard-saved key</span>
+            </label>
+            <button type="submit">Save company API key</button>
+          </form>
+        </div>
+        <div class="panel stat-row">
+          <div>
+            <span class="stat">${channels.length}</span>
+            <span class="muted">channels</span>
+          </div>
+          <div>
+            <span class="stat">${channelsWithBusinesses}</span>
+            <span class="muted">mapped channels</span>
+          </div>
+          <div>
+            <span class="stat">${mappedBusinessCount}</span>
+            <span class="muted">business IDs</span>
+          </div>
+          <div>
+            <span class="stat">${whop.configured ? "On" : "Off"}</span>
+            <span class="muted">API key</span>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Channel business mappings</h2>
+          <span class="muted">Add a biz name and biz ID to any Slack channel.</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Channel</th>
+                <th>Current businesses</th>
+                <th>Add business</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${channels.map((channel) => whopChannelRow(channel)).join("")}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      `
+    )
+  );
+}
+
 async function renderSplitit(res: ServerResponse, notice: string, selectedJobId: string) {
   const [jobs, splititSettings] = await Promise.all([loadSplititJobs(), getSplititAgentSettings()]);
   const selectedJob = selectedJobId
@@ -933,11 +1023,12 @@ async function renderSplitit(res: ServerResponse, notice: string, selectedJobId:
   );
 }
 
-function nav(active: "metrics" | "channels" | "splitit" | "settings") {
+function nav(active: "metrics" | "channels" | "whop" | "splitit" | "settings") {
   return `
     <nav class="top-nav">
       <a class="${active === "metrics" ? "active" : ""}" href="/dashboard/metrics">Metrics</a>
       <a class="${active === "channels" ? "active" : ""}" href="/dashboard/channels">Channels</a>
+      <a class="${active === "whop" ? "active" : ""}" href="/dashboard/whop">Whop</a>
       <a class="${active === "splitit" ? "active" : ""}" href="/dashboard/splitit">Splitit</a>
       <a class="${active === "settings" ? "active" : ""}" href="/dashboard/settings">Settings</a>
     </nav>
@@ -1215,6 +1306,46 @@ function whopBusinessTable(channel: DashboardChannel) {
           `).join("")}
         </tbody>
       </table>
+    </div>
+  `;
+}
+
+function whopChannelRow(channel: DashboardChannel) {
+  const displayName = channel.companyName ?? channel.name ?? channel.slackChannelId;
+  return `
+    <tr>
+      <td>
+        <strong>${escapeHtml(displayName)}</strong><br />
+        <code>${escapeHtml(channel.slackChannelId)}</code>
+      </td>
+      <td>${channel.whopBusinesses.length ? whopBusinessList(channel) : `<span class="muted">No businesses mapped yet.</span>`}</td>
+      <td>
+        <form class="business-inline" method="post" action="/dashboard/channel-whop-business">
+          <input type="hidden" name="channelId" value="${escapeHtml(channel.slackChannelId)}" />
+          <input type="hidden" name="returnTo" value="/dashboard/whop?notice=Whop business mapping saved" />
+          <input name="businessName" placeholder="Business name" required />
+          <input name="businessId" placeholder="biz_..." required />
+          <button type="submit">Add</button>
+        </form>
+      </td>
+    </tr>
+  `;
+}
+
+function whopBusinessList(channel: DashboardChannel) {
+  return `
+    <div class="business-list">
+      ${channel.whopBusinesses.map((business) => `
+        <div class="business-pill">
+          <span><strong>${escapeHtml(business.businessName)}</strong><code>${escapeHtml(business.businessId)}</code></span>
+          <form method="post" action="/dashboard/channel-whop-business/delete">
+            <input type="hidden" name="channelId" value="${escapeHtml(channel.slackChannelId)}" />
+            <input type="hidden" name="businessMappingId" value="${escapeHtml(business.id)}" />
+            <input type="hidden" name="returnTo" value="/dashboard/whop?notice=Whop business mapping removed" />
+            <button class="danger-button small" type="submit">Remove</button>
+          </form>
+        </div>
+      `).join("")}
     </div>
   `;
 }
@@ -1520,6 +1651,12 @@ function redirect(res: ServerResponse, location: string) {
   res.end();
 }
 
+function safeReturnPath(value: string | undefined, fallback: string) {
+  if (!value?.startsWith("/dashboard")) return fallback;
+  if (value.startsWith("//")) return fallback;
+  return value;
+}
+
 function sendText(res: ServerResponse, status: number, text: string) {
   if (res.writableEnded) return;
   res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8" });
@@ -1630,6 +1767,10 @@ function css() {
     .bubble p { margin: 0; white-space: pre-wrap; }
     .bubble small { display: block; margin-top: 7px; color: var(--muted); font-size: 11px; }
     .manual-message { display: grid; gap: 10px; }
+    .business-inline { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(150px, 1fr) auto; gap: 8px; align-items: center; min-width: 520px; }
+    .business-list { display: grid; gap: 8px; min-width: 260px; }
+    .business-pill { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: #fbfdff; }
+    .business-pill span { display: grid; gap: 4px; }
     .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
     .compact-table { margin-top: 6px; }
     .compact-table table { min-width: 0; }
@@ -1645,6 +1786,6 @@ function css() {
     .login-panel { max-width: 440px; margin: 15vh auto 0; }
     .login { display: grid; gap: 14px; margin-top: 18px; }
     @media (max-width: 1000px) { .stat-grid { grid-template-columns: repeat(3, 1fr); } }
-    @media (max-width: 820px) { main { width: min(100vw - 24px, 1180px); padding-top: 20px; } .hero, .panel-head { align-items: stretch; flex-direction: column; } .grid, .splitit-layout { grid-template-columns: 1fr; } .stat-row, .stat-grid, .splitit-meta { grid-template-columns: 1fr; } }
+    @media (max-width: 820px) { main { width: min(100vw - 24px, 1180px); padding-top: 20px; } .hero, .panel-head { align-items: stretch; flex-direction: column; } .grid, .splitit-layout { grid-template-columns: 1fr; } .stat-row, .stat-grid, .splitit-meta, .business-inline { grid-template-columns: 1fr; min-width: 0; } }
   `;
 }
