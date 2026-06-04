@@ -6,14 +6,16 @@ const config = {
   port: Number(process.env.PORT ?? 3000),
   secret: process.env.SPLITIT_AGENT_SECRET ?? "",
   userDataDir: process.env.SPLITIT_AGENT_USER_DATA_DIR ?? "/data/splitit-browser",
-  headless: (process.env.SPLITIT_AGENT_HEADLESS ?? "true") !== "false"
+  headless: (process.env.SPLITIT_AGENT_HEADLESS ?? "true") !== "false",
+  minActionDelayMs: Number(process.env.SPLITIT_AGENT_MIN_ACTION_DELAY_MS ?? 3500),
+  maxActionDelayMs: Number(process.env.SPLITIT_AGENT_MAX_ACTION_DELAY_MS ?? 7000)
 };
 
 const executeSchema = z.object({
   jobId: z.string().min(1),
   requestId: z.number().optional(),
   targetEmail: z.string().optional(),
-  splititUrl: z.string().default("https://splitit.com"),
+  splititUrl: z.string().default("https://www.splitit.com/contact/"),
   action: z.enum(["run_script", "manual_message"]).default("run_script"),
   message: z.string().optional(),
   conversationPlan: z.array(z.object({
@@ -110,6 +112,7 @@ async function execute(payload: ExecutePayload) {
     log(session, `Waiting: ${step.waitFor}`);
     await waitForChatReady(session);
     await waitForLatestSplititResponse(session);
+    await humanDelay(session, `Preparing to send ${step.step}`);
     await sendChatMessage(session, step.send);
     sentMessages.push(step.send);
     log(session, `Sent ${step.step}: ${step.send}`);
@@ -171,16 +174,23 @@ async function getOrCreateSession(payload: ExecutePayload) {
 
   log(session, `Opening ${payload.splititUrl}`);
   await page.goto(payload.splititUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
+  await page.waitForLoadState("networkidle", { timeout: 20_000 }).catch(() => undefined);
+  await humanDelay(session, "Waiting before opening chat");
   await clickChatLauncher(session);
   return session;
 }
 
 async function clickChatLauncher(session: Session) {
   const page = session.page;
+  await clickBottomRightLauncher(session, "initial bottom-right launcher");
+  if (await chatInputExists(page, 8000)) return;
+
   const selectors = [
     "button[aria-label*='chat' i]",
     "button[aria-label*='message' i]",
     "[role='button'][aria-label*='chat' i]",
+    "button:has-text('Chat with us')",
+    "a:has-text('Chat with us')",
     "iframe[title*='chat' i]",
     ".intercom-launcher",
     "#intercom-container button",
@@ -192,32 +202,28 @@ async function clickChatLauncher(session: Session) {
     const locator = page.locator(selector).first();
     try {
       await locator.waitFor({ state: "visible", timeout: 4000 });
+      await humanDelay(session, `Clicking launcher selector ${selector}`);
       await locator.click({ timeout: 4000 });
       log(session, `Clicked chat launcher: ${selector}`);
-      await page.waitForTimeout(1500);
-      return;
+      await page.waitForTimeout(4000);
+      if (await chatInputExists(page, 5000)) return;
+      log(session, `Launcher selector did not open an input: ${selector}`);
     } catch {
       // Try the next common chat selector.
     }
   }
 
-  try {
-    const viewport = page.viewportSize() ?? { width: 1440, height: 1000 };
-    await page.mouse.click(viewport.width - 48, viewport.height - 48);
-    log(session, "Clicked bottom-right chat launcher fallback");
-    await page.waitForTimeout(2500);
-    return;
-  } catch {
-    // Keep trying iframe fallbacks.
-  }
+  await clickBottomRightLauncher(session, "bottom-right launcher fallback");
+  if (await chatInputExists(page, 5000)) return;
 
   const frames = page.frames();
   for (const frame of frames) {
     try {
       const button = frame.locator("button, [role='button']").first();
+      await humanDelay(session, "Clicking iframe launcher fallback");
       await button.click({ timeout: 3000 });
       log(session, "Clicked chat launcher inside iframe");
-      await page.waitForTimeout(1500);
+      await page.waitForTimeout(4000);
       return;
     } catch {
       // Try the next frame.
@@ -227,19 +233,42 @@ async function clickChatLauncher(session: Session) {
   throw new Error("Could not find Splitit chat launcher.");
 }
 
+async function clickBottomRightLauncher(session: Session, label: string) {
+  const viewport = session.page.viewportSize() ?? { width: 1440, height: 1000 };
+  await humanDelay(session, `Clicking ${label}`);
+  await session.page.mouse.click(viewport.width - 28, viewport.height - 28);
+  log(session, `Clicked ${label}`);
+  await session.page.waitForTimeout(5000);
+}
+
 async function waitForChatReady(session: Session) {
   await waitForLatestSplititResponse(session, 20_000);
 }
 
 async function sendChatMessage(session: Session, message: string) {
   const target = await findChatInput(session.page);
+  await humanDelay(session, "Typing chat message");
   await target.fill(message);
+  await session.page.waitForTimeout(1200);
   await target.press("Enter");
   session.sentMessages.push(message);
   session.updatedAt = new Date();
 }
 
+async function chatInputExists(page: Page, timeoutMs: number) {
+  try {
+    await findChatInputWithTimeout(page, timeoutMs);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function findChatInput(page: Page) {
+  return findChatInputWithTimeout(page, 3000);
+}
+
+async function findChatInputWithTimeout(page: Page, timeoutMs: number) {
   const selectors = [
     "textarea",
     "textarea[placeholder*='message' i]",
@@ -254,7 +283,7 @@ async function findChatInput(page: Page) {
     for (const selector of selectors) {
       const locator = frame.locator(selector).last();
       try {
-        await locator.waitFor({ state: "visible", timeout: 3000 });
+        await locator.waitFor({ state: "visible", timeout: timeoutMs });
         return locator;
       } catch {
         // Keep searching.
@@ -271,7 +300,7 @@ async function waitForLatestSplititResponse(session: Session, timeoutMs = 30_000
   let latest = before;
 
   do {
-    await session.page.waitForTimeout(1200);
+    await session.page.waitForTimeout(3000);
     const text = await collectVisibleText(session.page);
     latest = text.split("\n").map((line) => line.trim()).filter(Boolean).slice(-8).join(" | ");
     if (latest && latest !== before) break;
@@ -312,7 +341,7 @@ function renderSession(res: ServerResponse, jobId: string) {
       <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <meta http-equiv="refresh" content="3" />
+        <meta http-equiv="refresh" content="12" />
         <title>Splitit session ${escapeHtml(jobId)}</title>
         <style>
           body { margin: 0; font-family: Inter, system-ui, sans-serif; background: #f8fafd; color: #202124; }
@@ -329,6 +358,18 @@ function renderSession(res: ServerResponse, jobId: string) {
         </main>
       </body>
     </html>`);
+}
+
+async function humanDelay(session: Session, reason: string) {
+  const delay = randomBetween(config.minActionDelayMs, config.maxActionDelayMs);
+  log(session, `${reason}; waiting ${Math.round(delay / 1000)}s`);
+  await session.page.waitForTimeout(delay);
+}
+
+function randomBetween(min: number, max: number) {
+  const safeMin = Math.max(0, Math.min(min, max));
+  const safeMax = Math.max(safeMin, max);
+  return Math.floor(safeMin + Math.random() * (safeMax - safeMin + 1));
 }
 
 async function renderScreenshot(res: ServerResponse, jobId: string) {

@@ -237,7 +237,7 @@ async function callSplititWebhook(
       conversationPlan: splititPlan(job),
       action: extra.action,
       message: extra.message,
-      splititUrl: "https://splitit.com"
+      splititUrl: "https://www.splitit.com/contact/"
     })
   });
 

@@ -324,11 +324,11 @@ To connect the real Splitit chat automation, set `SPLITIT_AGENT_WEBHOOK_URL` in 
     { "step": "SENT_WHITELIST_REQUEST", "waitFor": "Splitit asks how it can help or is ready for the whitelist request", "send": "Please whitelist, I understand the risks customer@example.com" }
   ],
   "action": "run_script",
-  "splititUrl": "https://splitit.com"
+  "splititUrl": "https://www.splitit.com/contact/"
 }
 ```
 
-The executor should open `https://splitit.com`, click the chat in the bottom-right corner, then use `conversationPlan` step-by-step. It should wait for the prompt described by `waitFor`, send only that step's `send` value, wait for the next prompt, and continue. It should not dump all messages at once.
+The executor should open `https://www.splitit.com/contact/`, click the chat in the bottom-right corner, then use `conversationPlan` step-by-step. It should wait for the prompt described by `waitFor`, send only that step's `send` value, wait for the next prompt, and continue. It should not dump all messages at once.
 
 The executor should return:
 
@@ -353,10 +353,11 @@ The companion browser executor lives in `outputs/splitit-agent`.
 
 It is a Playwright service that:
 
-- opens `https://splitit.com`
+- opens `https://www.splitit.com/contact/`
 - clicks the bottom-right chat launcher
 - waits for the chat prompt to appear/change
 - sends each `conversationPlan` value one at a time
+- adds human-paced delays between page load, launcher clicks, and messages
 - keeps a persistent browser profile under `/data`
 - exposes `/sessions/:jobId` so a live Chromium session can be watched from the dashboard
 
