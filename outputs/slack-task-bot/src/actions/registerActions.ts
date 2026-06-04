@@ -120,14 +120,10 @@ export function registerActions(app: App) {
     const title = modalValue(view, "title").trim();
     const description = modalValue(view, "description").trim();
     const type = modalSelectedValue(view, "type") as RequestType;
-    const dueDateInput = modalValue(view, "dueDate").trim();
-    const blocker = modalValue(view, "blocker").trim();
-    const dueDate = dueDateInput ? parseDueDate(dueDateInput) : null;
 
     const errors: Record<string, string> = {};
     if (!title) errors.title = "Add a short title.";
     if (!description) errors.description = "Add request details.";
-    if (dueDateInput && !dueDate) errors.dueDate = "Use yyyy-mm-dd or mm/dd/yyyy.";
 
     if (Object.keys(errors).length) {
       await ack({ response_action: "errors", errors });
@@ -147,8 +143,8 @@ export function registerActions(app: App) {
         type: type || "OTHER",
         requesterSlackUserId: body.user.id,
         channelId,
-        dueDate,
-        blocker
+        dueDate: null,
+        blocker: null
       });
 
       const result = await sendRequesterStatusMessage(client, request);

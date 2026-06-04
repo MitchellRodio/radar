@@ -202,29 +202,6 @@ export function requestCreateModal(input: { channelId: string; initialDescriptio
           ]
         },
         label: { type: "plain_text", text: "Request type" }
-      },
-      {
-        type: "input",
-        block_id: "dueDate",
-        optional: true,
-        element: {
-          type: "plain_text_input",
-          action_id: "value",
-          placeholder: { type: "plain_text", text: "2026-06-15" }
-        },
-        label: { type: "plain_text", text: "Due date" }
-      },
-      {
-        type: "input",
-        block_id: "blocker",
-        optional: true,
-        element: {
-          type: "plain_text_input",
-          action_id: "value",
-          multiline: true,
-          placeholder: { type: "plain_text", text: "Missing info, waiting on customer, etc." }
-        },
-        label: { type: "plain_text", text: "Blocker" }
       }
     ]
   };

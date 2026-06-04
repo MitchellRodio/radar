@@ -467,14 +467,10 @@ async function handleSlackViewSubmission(payload: any, res: ServerResponse) {
     const title = modalValue(view, "title").trim();
     const description = modalValue(view, "description").trim();
     const type = modalSelectedValue(view, "type") as RequestType;
-    const dueDateInput = modalValue(view, "dueDate").trim();
-    const blocker = modalValue(view, "blocker").trim();
-    const dueDate = dueDateInput ? parseDueDate(dueDateInput) : null;
 
     const errors: Record<string, string> = {};
     if (!title) errors.title = "Add a short title.";
     if (!description) errors.description = "Add request details.";
-    if (dueDateInput && !dueDate) errors.dueDate = "Use yyyy-mm-dd or mm/dd/yyyy.";
 
     if (Object.keys(errors).length) {
       sendSlackJson(res, { response_action: "errors", errors });
@@ -493,8 +489,8 @@ async function handleSlackViewSubmission(payload: any, res: ServerResponse) {
       type: type || "OTHER",
       requesterSlackUserId: actorSlackUserId,
       channelId,
-      dueDate,
-      blocker
+      dueDate: null,
+      blocker: null
     });
 
     const result = await sendRequesterStatusMessage(slack, request);
