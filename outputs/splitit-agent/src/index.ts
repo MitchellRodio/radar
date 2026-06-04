@@ -182,6 +182,18 @@ async function getOrCreateSession(payload: ExecutePayload) {
 }
 
 async function acceptCookieBanner(session: Session) {
+  await session.page.waitForTimeout(2500);
+
+  try {
+    await humanDelay(session, "Accepting cookie banner by visible text");
+    await session.page.getByText("Accept all", { exact: true }).last().click({ timeout: 3000 });
+    log(session, "Accepted cookie banner by visible text");
+    await session.page.waitForTimeout(3000);
+    return;
+  } catch {
+    // Try structural selectors and frame fallbacks.
+  }
+
   const selectors = [
     "button:has-text('Accept all')",
     "button:has-text('Accept All')",
@@ -205,10 +217,31 @@ async function acceptCookieBanner(session: Session) {
     }
   }
 
+  for (const frame of session.page.frames()) {
+    try {
+      const clicked = await frame.evaluate(() => {
+        const elements = Array.from(document.querySelectorAll("button, a, [role='button'], input[type='button'], input[type='submit']"));
+        const target = elements.find((element) => /accept all/i.test((element.textContent || (element as HTMLInputElement).value || "").trim()));
+        if (!target) return false;
+        (target as HTMLElement).click();
+        return true;
+      });
+      if (clicked) {
+        log(session, "Accepted cookie banner inside frame");
+        await session.page.waitForTimeout(3000);
+        return;
+      }
+    } catch {
+      // Try the next frame.
+    }
+  }
+
   const visibleText = await collectVisibleText(session.page).catch(() => "");
   if (/our cookies|accept all/i.test(visibleText)) {
     const viewport = session.page.viewportSize() ?? { width: 1440, height: 1000 };
     await humanDelay(session, "Accepting cookie banner with coordinate fallback");
+    await session.page.mouse.click(viewport.width - 270, viewport.height - 52);
+    await session.page.waitForTimeout(1200);
     await session.page.mouse.click(viewport.width - 270, viewport.height - 52);
     log(session, "Accepted cookie banner with coordinate fallback");
     await session.page.waitForTimeout(3000);
