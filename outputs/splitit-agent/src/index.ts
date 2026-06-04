@@ -107,11 +107,19 @@ async function execute(payload: ExecutePayload) {
     ? payload.conversationPlan
     : payload.messages.map((message, index) => ({ step: `STEP_${index + 1}`, waitFor: "next Splitit prompt", send: message }));
 
+  if (!plan.length) {
+    await waitForChatReady(session);
+    return {
+      status: "waiting",
+      sentMessages: [],
+      response: "Chat opened."
+    };
+  }
+
   const sentMessages: string[] = [];
   for (const step of plan) {
     log(session, `Waiting: ${step.waitFor}`);
     await waitForChatReady(session);
-    await waitForLatestSplititResponse(session);
     await humanDelay(session, `Preparing to send ${step.step}`);
     await sendChatMessage(session, step.send);
     sentMessages.push(step.send);
@@ -184,14 +192,9 @@ async function getOrCreateSession(payload: ExecutePayload) {
 async function acceptCookieBanner(session: Session) {
   await session.page.waitForTimeout(2500);
 
-  try {
-    await humanDelay(session, "Accepting cookie banner by visible text");
-    await session.page.getByText("Accept all", { exact: true }).last().click({ timeout: 3000 });
-    log(session, "Accepted cookie banner by visible text");
+  if (await clickElementByText(session, /^accept all$/i, "cookie accept text")) {
     await session.page.waitForTimeout(3000);
     return;
-  } catch {
-    // Try structural selectors and frame fallbacks.
   }
 
   const selectors = [
@@ -250,8 +253,8 @@ async function acceptCookieBanner(session: Session) {
 
 async function clickChatLauncher(session: Session) {
   const page = session.page;
-  await clickBottomRightLauncher(session, "initial bottom-right launcher");
-  if (await waitUntilChatOpened(page, 7000)) return;
+  await clickChatWithUsButton(session);
+  if (await waitUntilChatInputVisible(page, 10_000)) return;
 
   const selectors = [
     "button[aria-label*='chat' i]",
@@ -274,7 +277,7 @@ async function clickChatLauncher(session: Session) {
       await locator.click({ timeout: 4000 });
       log(session, `Clicked chat launcher: ${selector}`);
       await page.waitForTimeout(4000);
-      if (await waitUntilChatOpened(page, 7000)) return;
+      if (await waitUntilChatInputVisible(page, 7000)) return;
       log(session, `Launcher selector did not open an input: ${selector}`);
     } catch {
       // Try the next common chat selector.
@@ -282,7 +285,7 @@ async function clickChatLauncher(session: Session) {
   }
 
   await clickBottomRightLauncher(session, "bottom-right launcher fallback");
-  if (await waitUntilChatOpened(page, 7000)) return;
+  if (await waitUntilChatInputVisible(page, 7000)) return;
 
   const frames = page.frames();
   for (const frame of frames) {
@@ -301,6 +304,17 @@ async function clickChatLauncher(session: Session) {
   throw new Error("Could not find Splitit chat launcher.");
 }
 
+async function clickChatWithUsButton(session: Session) {
+  await session.page.locator("text=Live chat").first().scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => undefined);
+  await humanDelay(session, "Clicking Chat with us button");
+  if (await clickElementByText(session, /^chat with us$/i, "Chat with us button")) return;
+
+  const viewport = session.page.viewportSize() ?? { width: 1440, height: 1000 };
+  await session.page.mouse.click(Math.floor(viewport.width * 0.75), Math.floor(viewport.height * 0.89));
+  log(session, "Clicked Chat with us coordinate fallback");
+  await session.page.waitForTimeout(5000);
+}
+
 async function clickBottomRightLauncher(session: Session, label: string) {
   const viewport = session.page.viewportSize() ?? { width: 1440, height: 1000 };
   await humanDelay(session, `Clicking ${label}`);
@@ -310,7 +324,8 @@ async function clickBottomRightLauncher(session: Session, label: string) {
 }
 
 async function waitForChatReady(session: Session) {
-  await waitForLatestSplititResponse(session, 20_000);
+  if (await waitUntilChatInputVisible(session.page, 20_000)) return;
+  throw new Error("Chat is not open yet; no Splitit chat input is visible.");
 }
 
 async function sendChatMessage(session: Session, message: string) {
@@ -346,24 +361,6 @@ async function chatInputExists(page: Page) {
   }
 }
 
-async function chatPromptVisible(page: Page) {
-  try {
-    const text = await collectVisibleText(page);
-    return /type a message|splitit support|how can i assist/i.test(text);
-  } catch {
-    return false;
-  }
-}
-
-async function chatOpened(page: Page) {
-  try {
-    if (await chatInputExists(page)) return true;
-    return chatPromptVisible(page);
-  } catch {
-    return false;
-  }
-}
-
 async function chatInputRequired(page: Page, timeoutMs: number) {
   const startedAt = Date.now();
   do {
@@ -377,10 +374,10 @@ async function chatInputRequired(page: Page, timeoutMs: number) {
   throw new Error("Could not find Splitit chat input.");
 }
 
-async function waitUntilChatOpened(page: Page, timeoutMs: number) {
+async function waitUntilChatInputVisible(page: Page, timeoutMs: number) {
   const startedAt = Date.now();
   do {
-    if (await chatOpened(page)) return true;
+    if (await chatInputExists(page)) return true;
     await page.waitForTimeout(1000);
   } while (Date.now() - startedAt < timeoutMs);
 
@@ -450,6 +447,37 @@ async function collectVisibleText(page: Page) {
 
 function responseLooksDone(response: string) {
   return /whitelist(ed)?|done|completed|success|approved/i.test(response);
+}
+
+async function clickElementByText(session: Session, pattern: RegExp, label: string) {
+  await humanDelay(session, `Clicking ${label}`);
+  for (const frame of session.page.frames()) {
+    try {
+      const clicked = await frame.evaluate((source) => {
+        const pattern = new RegExp(source, "i");
+        const clickableElements = Array.from(document.querySelectorAll("button, a, [role='button'], input[type='button'], input[type='submit']"));
+        const textElements = Array.from(document.querySelectorAll("span, div"));
+        const matches = (element: Element) => {
+          const text = ((element.textContent || (element as HTMLInputElement).value || "").trim()).replace(/\s+/g, " ");
+          return pattern.test(text);
+        };
+        const target = clickableElements.find(matches) ?? textElements.find(matches);
+        const clickable = target?.closest("button, a, [role='button'], input[type='button'], input[type='submit']") ?? target;
+        if (!clickable) return false;
+        (clickable as HTMLElement).click();
+        return true;
+      }, pattern.source);
+      if (clicked) {
+        log(session, `Clicked ${label}`);
+        await session.page.waitForTimeout(5000);
+        return true;
+      }
+    } catch {
+      // Try the next frame.
+    }
+  }
+  log(session, `Could not click ${label}`);
+  return false;
 }
 
 function renderSession(res: ServerResponse, jobId: string) {
