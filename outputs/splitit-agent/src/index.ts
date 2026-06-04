@@ -617,8 +617,8 @@ async function waitForLatestSplititResponse(session: Session, timeoutMs = 30_000
 
   do {
     await session.page.waitForTimeout(3000);
-    const text = await collectVisibleText(session.page);
-    latest = text.split("\n").map((line) => line.trim()).filter(Boolean).slice(-8).join(" | ");
+    const text = await collectChatText(session.page) || await collectVisibleText(session.page);
+    latest = text.split("\n").map((line) => line.trim()).filter(Boolean).slice(-10).join(" | ");
     if (latest && latest !== before) break;
   } while (Date.now() - startedAt < timeoutMs);
 
@@ -632,13 +632,127 @@ async function collectVisibleText(page: Page) {
   const chunks: string[] = [];
   for (const frame of page.frames()) {
     try {
-      const text = await frame.locator("body").innerText({ timeout: 1000 });
+      const text = await frame.evaluate(() => {
+        const uniqueLines = (lines: string[]) => {
+          const seen = new Set<string>();
+          const values: string[] = [];
+          for (const line of lines.map((value) => value.trim()).filter(Boolean)) {
+            const key = line.toLowerCase();
+            if (seen.has(key)) continue;
+            seen.add(key);
+            values.push(line);
+          }
+          return values;
+        };
+        const collectNodes = (root: Element | ShadowRoot | null) => {
+          const results: string[] = [];
+          const visit = (node: Element | ShadowRoot) => {
+            const elements = Array.from(node.children);
+            for (const element of elements) {
+              const htmlElement = element as HTMLElement;
+              const rect = htmlElement.getBoundingClientRect();
+              const style = window.getComputedStyle(htmlElement);
+              const visible = style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+              if (!visible) continue;
+              const directText = Array.from(htmlElement.childNodes)
+                .filter((child) => child.nodeType === Node.TEXT_NODE)
+                .map((child) => child.textContent?.trim() ?? "")
+                .filter(Boolean)
+                .join(" ")
+                .replace(/\s+/g, " ")
+                .trim();
+              if (directText) results.push(directText);
+              if (htmlElement.shadowRoot) visit(htmlElement.shadowRoot);
+              visit(htmlElement);
+            }
+          };
+          if (root) visit(root);
+          return results;
+        };
+        return uniqueLines(collectNodes(document.body)).join("\n");
+      });
       if (text) chunks.push(text);
     } catch {
       // Some frames are not readable.
     }
   }
   return chunks.join("\n");
+}
+
+async function collectChatText(page: Page) {
+  const chunks: string[] = [];
+  for (const frame of page.frames()) {
+    try {
+      const frameText = await frame.evaluate(() => {
+        const uniqueLines = (lines: string[]) => {
+          const seen = new Set<string>();
+          const values: string[] = [];
+          for (const line of lines.map((value) => value.trim()).filter(Boolean)) {
+            const key = line.toLowerCase();
+            if (seen.has(key)) continue;
+            seen.add(key);
+            values.push(line);
+          }
+          return values;
+        };
+        const collectNodes = (root: Element | ShadowRoot | null) => {
+          const results: Array<{ text: string; rect: { left: number; top: number } }> = [];
+          const visit = (node: Element | ShadowRoot) => {
+            const elements = Array.from(node.children);
+            for (const element of elements) {
+              const htmlElement = element as HTMLElement;
+              const rect = htmlElement.getBoundingClientRect();
+              const style = window.getComputedStyle(htmlElement);
+              const visible = style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+              if (!visible) continue;
+              const directText = Array.from(htmlElement.childNodes)
+                .filter((child) => child.nodeType === Node.TEXT_NODE)
+                .map((child) => child.textContent?.trim() ?? "")
+                .filter(Boolean)
+                .join(" ")
+                .replace(/\s+/g, " ")
+                .trim();
+              if (directText) results.push({ text: directText, rect: { left: rect.left, top: rect.top } });
+              if (htmlElement.shadowRoot) visit(htmlElement.shadowRoot);
+              visit(htmlElement);
+            }
+          };
+          if (root) visit(root);
+          return results;
+        };
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        const nodes = collectNodes(document.body);
+        const chatWeighted = nodes
+          .filter((node) => {
+            const text = node.text.trim();
+            const inRightPanel = node.rect.left > viewportWidth * 0.48 && node.rect.top < viewportHeight * 0.98;
+            const chatText = /splitit support|finley|type a message|merchant|shopper|store name|merchant account|how can i assist|provide your name|associated with your splitit/i.test(text);
+            const notCookie = !/our cookies|manage cookies|accept all|nmls|privacy policy|terms|consumer access/i.test(text);
+            return notCookie && (inRightPanel || chatText);
+          })
+          .sort((a, b) => a.rect.top - b.rect.top)
+          .map((node) => node.text);
+        return uniqueLines(chatWeighted).join("\n");
+      });
+      if (frameText) chunks.push(frameText);
+    } catch {
+      // Some frames are not readable.
+    }
+  }
+  return uniqueLines(chunks.flatMap((chunk) => chunk.split("\n"))).join("\n");
+}
+
+function uniqueLines(lines: string[]) {
+  const seen = new Set<string>();
+  const values: string[] = [];
+  for (const line of lines.map((value) => value.trim()).filter(Boolean)) {
+    const key = line.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    values.push(line);
+  }
+  return values;
 }
 
 function responseLooksDone(response: string) {
