@@ -284,7 +284,6 @@ export function requestCreateModal(input: { channelId: string; initialDescriptio
           options: [
             requestTypeOption("CHECKOUT_LINK"),
             requestTypeOption("SPLITIT_WHITELIST"),
-            requestTypeOption("REFUND_PAYMENT"),
             requestTypeOption("BUG_REPORT"),
             requestTypeOption("ENHANCEMENT_REQUEST"),
             requestTypeOption("KYC_KYB"),
@@ -355,10 +354,10 @@ function threadText(request: Request) {
 }
 
 function companyChannelLink(request: RequestWithRelations) {
-  const label = escapeMrkdwn(request.channel?.companyName ?? request.channel?.name ?? request.channelId);
+  const label = escapeMrkdwn(channelTagLabel(request));
   const messageUrl = requestMessageUrl(request);
   if (messageUrl) return `<${messageUrl}|${label}>`;
-  return `<#${request.channelId}>`;
+  return label;
 }
 
 function requestMessageUrl(request: RequestWithRelations) {
@@ -367,6 +366,16 @@ function requestMessageUrl(request: RequestWithRelations) {
     return threadLink(request.requesterMessageChannelId, request.requesterMessageTs);
   }
   return "";
+}
+
+function channelTagLabel(request: RequestWithRelations) {
+  const channelName = request.channel?.name?.replace(/^#/, "").trim();
+  if (channelName) return `#${channelName}`;
+
+  const companyName = request.channel?.companyName?.replace(/^#/, "").trim();
+  if (companyName) return `#${companyName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`;
+
+  return `#${request.channelId}`;
 }
 
 function checkoutProductOption(product: CheckoutProductOption) {

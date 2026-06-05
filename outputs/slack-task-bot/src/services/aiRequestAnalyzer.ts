@@ -15,7 +15,6 @@ type AiRequestMetadata = {
 const requestTypes: RequestType[] = [
   "CHECKOUT_LINK",
   "SPLITIT_WHITELIST",
-  "REFUND_PAYMENT",
   "BUG_REPORT",
   "ENHANCEMENT_REQUEST",
   "KYC_KYB",

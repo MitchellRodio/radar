@@ -4,7 +4,6 @@ import { parseDueDate } from "../lib/dates";
 const typeRules: Array<{ type: RequestType; patterns: RegExp[] }> = [
   { type: "CHECKOUT_LINK", patterns: [/checkout link/i, /payment link/i, /invoice link/i] },
   { type: "SPLITIT_WHITELIST", patterns: [/splitit/i, /whitelist/i] },
-  { type: "REFUND_PAYMENT", patterns: [/refund/i, /reverse payment/i] },
   { type: "BUG_REPORT", patterns: [/bug/i, /broken/i, /error/i, /not working/i] },
   { type: "ENHANCEMENT_REQUEST", patterns: [/enhancement/i, /feature request/i, /can you add/i] },
   { type: "KYC_KYB", patterns: [/\bkyc\b/i, /\bkyb\b/i, /verification/i] },
@@ -126,7 +125,6 @@ function suggestNextStep(type: RequestType, extractedFields: Prisma.InputJsonVal
   }
 
   if (type === "SPLITIT_WHITELIST") return "Confirm the account or buyer details needed for Splitit whitelist review.";
-  if (type === "REFUND_PAYMENT") return "Confirm the payment ID, amount, and refund approval before processing.";
   if (type === "BUG_REPORT") return "Collect reproduction steps, affected account, screenshots, and expected behavior.";
   if (type === "ENHANCEMENT_REQUEST") return "Capture the use case and impact, then decide whether it belongs in product feedback.";
   if (type === "KYC_KYB") return "Confirm which verification entity is blocked and gather missing compliance details.";
