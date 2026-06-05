@@ -11,11 +11,14 @@ import {
   getOpenAiSettingsStatus,
   getSplititAgentSettings,
   getSplititAgentSettingsStatus,
+  getWhopWebhookSettings,
   saveOpenAiSettings,
-  saveSplititAgentSettings
+  saveSplititAgentSettings,
+  saveWhopWebhookSettings
 } from "../services/appSettingsService";
 import { mapChannelOwner } from "../services/channelOwnerService";
 import { deleteChannelWhopBusiness, upsertChannelWhopBusiness } from "../services/channelWhopBusinessService";
+import { customerLookupBlocks, lookupCustomerAccount } from "../services/customerLookupService";
 import {
   addInternalNote,
   addRequesterReply,
@@ -34,6 +37,14 @@ import {
 } from "../services/requestService";
 import { ensureChannel, ensureUser } from "../services/userService";
 import { isLiveSplititJob, queueSplititAutomation, sendManualSplititMessage } from "../services/splititAutomationService";
+import {
+  deleteWhopWebhookRoute,
+  handleWhopWebhook,
+  normalizeEventType,
+  setWhopWebhookRouteEnabled,
+  upsertWhopWebhookRoute,
+  WHOP_WEBHOOK_EVENT_TYPES
+} from "../services/whopWebhookService";
 import { helpBlocks, inputModal, requesterReplyModal, requestCreateModal, requestDetailModal, requestListBlocks } from "../slack/blocks";
 import { statusLabel, typeLabel } from "../slack/format";
 import {
@@ -109,6 +120,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
+  if (url.pathname === "/whop/webhooks" && req.method === "POST") {
+    await handleWhopWebhookRequest(req, res);
+    return;
+  }
+
   if (!url.pathname.startsWith("/dashboard")) {
     sendText(res, 404, "Not found");
     return;
@@ -141,6 +157,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
 
   if (req.method === "GET" && url.pathname === "/dashboard/whop") {
     await renderWhop(res, url.searchParams.get("notice") ?? "");
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/dashboard/whop-events") {
+    await renderWhopEvents(res, req, url.searchParams.get("notice") ?? "");
     return;
   }
 
@@ -179,6 +200,46 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       clearWebhookSecret: body.get("clearSplititWebhookSecret") === "on"
     });
     redirect(res, "/dashboard/settings?notice=Splitit agent settings updated");
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/dashboard/whop-events/settings") {
+    const body = await readForm(req);
+    await saveWhopWebhookSettings({
+      webhookSecret: body.get("whopWebhookSecret")?.toString(),
+      clearWebhookSecret: body.get("clearWhopWebhookSecret") === "on"
+    });
+    redirect(res, "/dashboard/whop-events?notice=Whop webhook settings updated");
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/dashboard/whop-events/routes") {
+    const body = await readForm(req);
+    const eventType = normalizeEventType(body.get("eventType")?.toString() ?? "");
+    const slackChannelId = extractSlackChannelId(body.get("slackChannelId")?.toString() ?? "") || body.get("slackChannelId")?.toString().trim() || "";
+    const businessId = body.get("businessId")?.toString().trim() || null;
+    if (eventType && slackChannelId) {
+      await ensureChannel(slackChannelId);
+      await upsertWhopWebhookRoute({ eventType, slackChannelId, businessId, enabled: true });
+    }
+    redirect(res, "/dashboard/whop-events?notice=Whop event route saved");
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/dashboard/whop-events/routes/toggle") {
+    const body = await readForm(req);
+    const routeId = body.get("routeId")?.toString() ?? "";
+    const enabled = body.get("enabled") === "true";
+    if (routeId) await setWhopWebhookRouteEnabled(routeId, enabled);
+    redirect(res, "/dashboard/whop-events?notice=Whop event route updated");
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/dashboard/whop-events/routes/delete") {
+    const body = await readForm(req);
+    const routeId = body.get("routeId")?.toString() ?? "";
+    if (routeId) await deleteWhopWebhookRoute(routeId);
+    redirect(res, "/dashboard/whop-events?notice=Whop event route deleted");
     return;
   }
 
@@ -321,6 +382,22 @@ async function handleSlackHttpRequest(req: IncomingMessage, res: ServerResponse)
         return;
       }
 
+      case "/customer-lookup": {
+        const email = extractEmail(text);
+        if (!email) {
+          sendSlackJson(res, { response_type: "ephemeral", text: "Usage: `/customer-lookup customer@example.com`" });
+          return;
+        }
+
+        const lookup = await lookupCustomerAccount({ channelId, email });
+        sendSlackJson(res, {
+          response_type: "ephemeral",
+          text: `Customer lookup: ${email}`,
+          blocks: customerLookupBlocks(lookup)
+        });
+        return;
+      }
+
       case "/my-requests": {
         const requests = await listAssignedOpenRequests(userId);
         sendSlackJson(res, { response_type: "ephemeral", blocks: requestListBlocks(requests, "My open requests") });
@@ -391,6 +468,17 @@ async function handleSlackHttpRequest(req: IncomingMessage, res: ServerResponse)
   } catch (error) {
     logger.error({ error, command }, "Failed to handle Slack HTTP slash command");
     sendSlackJson(res, { response_type: "ephemeral", text: "Sorry, I could not handle that command." });
+  }
+}
+
+async function handleWhopWebhookRequest(req: IncomingMessage, res: ServerResponse) {
+  const bodyText = await readBody(req);
+  try {
+    await handleWhopWebhook({ bodyText, headers: req.headers, slack });
+    sendText(res, 200, "ok");
+  } catch (error) {
+    logger.error({ error }, "Failed to handle Whop webhook");
+    sendText(res, 400, "invalid webhook");
   }
 }
 
@@ -954,6 +1042,127 @@ async function renderWhop(res: ServerResponse, notice: string) {
   );
 }
 
+async function renderWhopEvents(res: ServerResponse, req: IncomingMessage, notice: string) {
+  const [settings, routes, deliveries] = await Promise.all([
+    getWhopWebhookSettings(),
+    loadWhopWebhookRoutes(),
+    loadWhopWebhookDeliveries()
+  ]);
+  const webhookUrl = `${dashboardBaseUrl(req)}/whop/webhooks`;
+  const enabledRoutes = routes.filter((route) => route.enabled).length;
+
+  sendHtml(
+    res,
+    200,
+    page(
+      "Radar Whop Events",
+      `
+      ${nav("whop-events")}
+      <section class="hero">
+        <div>
+          <p class="eyebrow">CSM event routing</p>
+          <h1>Whop event router</h1>
+          <p class="muted">Route exact Whop webhook events into specific customer Slack channels. This page is dashboard-side so sales reps do not configure event routing.</p>
+        </div>
+      </section>
+      ${notice ? `<div class="notice">${escapeHtml(notice)}</div>` : ""}
+      <section class="stat-grid splitit-stats">
+        ${statCard("Routes", routes.length)}
+        ${statCard("Enabled", enabledRoutes)}
+        ${statCard("Deliveries", deliveries.length)}
+      </section>
+      <section class="grid">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Webhook setup</h2>
+            <span class="pill ${settings.webhookSecret ? "ok" : ""}">${settings.webhookSecret ? `Secret via ${settings.source}` : "No secret"}</span>
+          </div>
+          <div class="stack">
+            <label>Webhook URL
+              <input readonly value="${escapeHtml(webhookUrl)}" />
+            </label>
+            <form class="stack" method="post" action="/dashboard/whop-events/settings">
+              <label>Webhook secret
+                <input name="whopWebhookSecret" type="password" placeholder="${settings.webhookSecret ? "Leave blank to keep current secret" : "Paste Whop webhook secret"}" />
+              </label>
+              <label class="check-row">
+                <input name="clearWhopWebhookSecret" type="checkbox" />
+                <span>Clear dashboard-saved secret</span>
+              </label>
+              <button type="submit">Save webhook secret</button>
+            </form>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Add route</h2>
+            <span class="muted">Pick the exact event to send</span>
+          </div>
+          <form class="stack" method="post" action="/dashboard/whop-events/routes">
+            <label>Slack channel ID
+              <input name="slackChannelId" placeholder="C0123456789 or #channel" />
+            </label>
+            <label>Whop event
+              <select name="eventType">
+                ${WHOP_WEBHOOK_EVENT_TYPES.map((eventType) => `<option value="${escapeHtml(eventType)}">${escapeHtml(eventType)}</option>`).join("")}
+              </select>
+            </label>
+            <label>Business ID filter (optional)
+              <input name="businessId" placeholder="biz_...; blank means any business for that event" />
+            </label>
+            <button type="submit">Create route</button>
+          </form>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Active routing rules</h2>
+          <span class="muted">Only enabled routes post to Slack</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Event</th>
+                <th>Slack channel</th>
+                <th>Business filter</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${routes.length ? routes.map(whopRouteRow).join("") : `<tr><td colspan="5" class="muted">No routes yet.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Recent deliveries</h2>
+          <span class="muted">Webhook delivery history and route status</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Event</th>
+                <th>Business</th>
+                <th>Routed channel</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${deliveries.length ? deliveries.map(whopDeliveryRow).join("") : `<tr><td colspan="5" class="muted">No deliveries yet.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      `
+    )
+  );
+}
+
 async function renderSplitit(res: ServerResponse, notice: string, selectedJobId: string) {
   const [jobs, splititSettings] = await Promise.all([loadSplititJobs(), getSplititAgentSettings()]);
   const selectedJob = selectedJobId
@@ -1010,12 +1219,13 @@ async function renderSplitit(res: ServerResponse, notice: string, selectedJobId:
   );
 }
 
-function nav(active: "metrics" | "channels" | "whop" | "splitit" | "settings") {
+function nav(active: "metrics" | "channels" | "whop" | "whop-events" | "splitit" | "settings") {
   return `
     <nav class="top-nav">
       <a class="${active === "metrics" ? "active" : ""}" href="/dashboard/metrics">Metrics</a>
       <a class="${active === "channels" ? "active" : ""}" href="/dashboard/channels">Channels</a>
       <a class="${active === "whop" ? "active" : ""}" href="/dashboard/whop">Whop</a>
+      <a class="${active === "whop-events" ? "active" : ""}" href="/dashboard/whop-events">Whop Events</a>
       <a class="${active === "splitit" ? "active" : ""}" href="/dashboard/splitit">Splitit</a>
       <a class="${active === "settings" ? "active" : ""}" href="/dashboard/settings">Settings</a>
     </nav>
@@ -1052,6 +1262,43 @@ function recentRequests(requests: Awaited<ReturnType<typeof loadRequestStats>>["
         </div>
       `).join("")}
     </div>
+  `;
+}
+
+function whopRouteRow(route: Awaited<ReturnType<typeof loadWhopWebhookRoutes>>[number]) {
+  const channel = route.channel?.name ? `#${route.channel.name}` : route.slackChannelId;
+  return `
+    <tr>
+      <td><strong>${escapeHtml(route.eventType)}</strong></td>
+      <td>${escapeHtml(channel)}<br /><code>${escapeHtml(route.slackChannelId)}</code></td>
+      <td>${route.businessId ? `<code>${escapeHtml(route.businessId)}</code>` : `<span class="muted">Any business</span>`}</td>
+      <td><span class="pill ${route.enabled ? "ok" : ""}">${route.enabled ? "Enabled" : "Paused"}</span></td>
+      <td>
+        <div class="table-actions">
+          <form method="post" action="/dashboard/whop-events/routes/toggle">
+            <input type="hidden" name="routeId" value="${escapeHtml(route.id)}" />
+            <input type="hidden" name="enabled" value="${route.enabled ? "false" : "true"}" />
+            <button type="submit" class="secondary-button small">${route.enabled ? "Pause" : "Enable"}</button>
+          </form>
+          <form method="post" action="/dashboard/whop-events/routes/delete">
+            <input type="hidden" name="routeId" value="${escapeHtml(route.id)}" />
+            <button type="submit" class="danger-button small">Delete</button>
+          </form>
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+function whopDeliveryRow(delivery: Awaited<ReturnType<typeof loadWhopWebhookDeliveries>>[number]) {
+  return `
+    <tr>
+      <td>${formatDate(delivery.createdAt)}</td>
+      <td><strong>${escapeHtml(delivery.eventType)}</strong></td>
+      <td>${delivery.businessId ? `<code>${escapeHtml(delivery.businessId)}</code>` : `<span class="muted">Unknown</span>`}</td>
+      <td>${delivery.slackChannelId ? `<code>${escapeHtml(delivery.slackChannelId)}</code>` : `<span class="muted">None</span>`}</td>
+      <td><span class="pill ${delivery.status === "ROUTED" ? "ok" : ""}">${escapeHtml(delivery.status)}</span></td>
+    </tr>
   `;
 }
 
@@ -1459,6 +1706,20 @@ async function loadSplititJobs() {
   });
 }
 
+async function loadWhopWebhookRoutes() {
+  return prisma.whopWebhookRoute.findMany({
+    include: { channel: true },
+    orderBy: [{ enabled: "desc" }, { eventType: "asc" }, { createdAt: "desc" }]
+  });
+}
+
+async function loadWhopWebhookDeliveries() {
+  return prisma.whopWebhookDelivery.findMany({
+    orderBy: { createdAt: "desc" },
+    take: 50
+  });
+}
+
 async function syncSlackChannels() {
   let cursor: string | undefined;
   do {
@@ -1477,6 +1738,12 @@ async function syncSlackChannels() {
 
     cursor = response.response_metadata?.next_cursor || undefined;
   } while (cursor);
+}
+
+function dashboardBaseUrl(req: IncomingMessage) {
+  const host = req.headers["x-forwarded-host"] ?? req.headers.host ?? "localhost";
+  const proto = req.headers["x-forwarded-proto"] ?? (String(host).includes("localhost") ? "http" : "https");
+  return `${Array.isArray(proto) ? proto[0] : proto}://${Array.isArray(host) ? host[0] : host}`;
 }
 
 async function syncSlackChannelMembers(slackChannelId: string) {
@@ -1616,6 +1883,10 @@ function isValidSlackSignature(req: IncomingMessage, rawBody: string) {
 
 function normalizeSlackUserId(value: string) {
   return value.trim().match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/)?.[1] ?? value.trim();
+}
+
+function extractEmail(value: string) {
+  return value.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i)?.[0] ?? "";
 }
 
 function normalizeUserRole(value: string): UserRole | null {
@@ -1780,6 +2051,7 @@ function css() {
     th { background: #f8fafd; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0; font-weight: 700; }
     tr:hover td { background: #fbfdff; }
     tr:last-child td { border-bottom: 0; }
+    .table-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     code { background: #f1f3f4; border-radius: 6px; padding: 2px 6px; font-size: 12px; color: #3c4043; }
     .pill, .role-chip { display: inline-flex; align-items: center; border-radius: 999px; padding: 3px 9px; background: #f1f3f4; color: #3c4043; font-size: 12px; font-weight: 700; text-transform: capitalize; }
     .pill.ok { background: #e6f4ea; color: var(--green); }

@@ -11,6 +11,7 @@ import {
   reassignRequest
 } from "../services/requestService";
 import { mapChannelOwner } from "../services/channelOwnerService";
+import { customerLookupBlocks, lookupCustomerAccount } from "../services/customerLookupService";
 
 export function registerCommands(app: App) {
   app.command("/my-requests", async ({ ack, command, respond }: any) => {
@@ -61,6 +62,30 @@ export function registerCommands(app: App) {
     }
   });
 
+  app.command("/customer-lookup", async ({ ack, command, respond }: any) => {
+    await ack();
+    const email = extractEmail(command.text ?? "");
+    if (!email) {
+      await respond({
+        response_type: "ephemeral",
+        text: "Usage: `/customer-lookup customer@example.com`"
+      });
+      return;
+    }
+
+    try {
+      const lookup = await lookupCustomerAccount({ channelId: command.channel_id, email });
+      await respond({
+        response_type: "ephemeral",
+        text: `Customer lookup: ${email}`,
+        blocks: customerLookupBlocks(lookup)
+      });
+    } catch (error) {
+      logger.error(error, "Failed to handle /customer-lookup");
+      await respond("Sorry, I could not look up that customer.");
+    }
+  });
+
   app.command("/request-map-channel", async ({ ack, command, respond }: any) => {
     await ack();
     if (!(await isAdmin(command.user_id))) {
@@ -108,4 +133,8 @@ export function registerCommands(app: App) {
       blocks: helpBlocks()
     });
   });
+}
+
+function extractEmail(value: string) {
+  return value.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i)?.[0] ?? "";
 }

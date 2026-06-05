@@ -20,6 +20,7 @@ const schema = z.object({
   SPLITIT_AGENT_INTERVAL_SECONDS: z.coerce.number().default(30),
   SPLITIT_AGENT_WEBHOOK_URL: z.string().optional().default(""),
   SPLITIT_AGENT_WEBHOOK_SECRET: z.string().optional().default(""),
+  WHOP_WEBHOOK_SECRET: z.string().optional().default(""),
   SPLITIT_AGENT_CSM_NAME: z.string().optional().default("Mitchell Rodio"),
   SPLITIT_AGENT_MERCHANT_ROLE: z.string().optional().default("Merchant"),
   SPLITIT_AGENT_STORE_NAME: z.string().optional().default("MitchellRodio Whop.com"),

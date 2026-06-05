@@ -5,6 +5,7 @@ const OPENAI_API_KEY = "OPENAI_API_KEY";
 const OPENAI_MODEL = "OPENAI_MODEL";
 const SPLITIT_AGENT_WEBHOOK_URL = "SPLITIT_AGENT_WEBHOOK_URL";
 const SPLITIT_AGENT_WEBHOOK_SECRET = "SPLITIT_AGENT_WEBHOOK_SECRET";
+const WHOP_WEBHOOK_SECRET = "WHOP_WEBHOOK_SECRET";
 
 export async function getOpenAiSettings() {
   const settings = await prisma.appSetting.findMany({
@@ -72,6 +73,23 @@ export async function getSplititAgentSettingsStatus() {
     configured: Boolean(settings.webhookUrl),
     source: settings.source
   };
+}
+
+export async function getWhopWebhookSettings() {
+  const setting = await prisma.appSetting.findUnique({ where: { key: WHOP_WEBHOOK_SECRET } });
+
+  return {
+    webhookSecret: setting?.value || config.WHOP_WEBHOOK_SECRET,
+    source: setting?.value ? "dashboard" : config.WHOP_WEBHOOK_SECRET ? "environment" : "missing"
+  };
+}
+
+export async function saveWhopWebhookSettings(input: { webhookSecret?: string; clearWebhookSecret?: boolean }) {
+  if (input.clearWebhookSecret) {
+    await prisma.appSetting.deleteMany({ where: { key: WHOP_WEBHOOK_SECRET } });
+  } else if (input.webhookSecret?.trim()) {
+    await upsertSetting(WHOP_WEBHOOK_SECRET, input.webhookSecret.trim());
+  }
 }
 
 async function upsertSetting(key: string, value: string) {
