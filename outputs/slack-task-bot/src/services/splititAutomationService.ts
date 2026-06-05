@@ -44,6 +44,11 @@ export async function queueSplititAutomation(client: any, requestId: number, act
     update: {
       targetEmail,
       approvedBySlackUserId: actorSlackUserId,
+      csmName: config.SPLITIT_AGENT_CSM_NAME,
+      merchantRole: config.SPLITIT_AGENT_MERCHANT_ROLE,
+      storeName: config.SPLITIT_AGENT_STORE_NAME,
+      merchantEmail: config.SPLITIT_AGENT_MERCHANT_EMAIL,
+      riskAcknowledgement: "Please whitelist",
       status: "QUEUED",
       step: "QUEUED",
       error: null,
@@ -57,6 +62,7 @@ export async function queueSplititAutomation(client: any, requestId: number, act
       merchantRole: config.SPLITIT_AGENT_MERCHANT_ROLE,
       storeName: config.SPLITIT_AGENT_STORE_NAME,
       merchantEmail: config.SPLITIT_AGENT_MERCHANT_EMAIL,
+      riskAcknowledgement: "Please whitelist",
       nextRunAt: now
     }
   });
@@ -115,8 +121,8 @@ export function splititMessages(job: Pick<SplititAutomationJob, "csmName" | "mer
   return [
     job.csmName,
     job.merchantRole,
-    `${job.storeName} ${job.merchantEmail}`,
-    `${job.riskAcknowledgement} ${job.targetEmail}`
+    splititMerchantIdentity(job),
+    splititWhitelistRequest(job.targetEmail)
   ];
 }
 
@@ -135,14 +141,22 @@ export function splititPlan(job: Pick<SplititAutomationJob, "csmName" | "merchan
     {
       step: "SENT_STORE_AND_EMAIL",
       waitFor: "Splitit asks for store name and/or merchant account email",
-      send: `${job.storeName} ${job.merchantEmail}`
+      send: splititMerchantIdentity(job)
     },
     {
       step: "SENT_WHITELIST_REQUEST",
       waitFor: "Splitit asks how it can help or is ready for the whitelist request",
-      send: `${job.riskAcknowledgement} ${job.targetEmail}`
+      send: splititWhitelistRequest(job.targetEmail)
     }
   ];
+}
+
+function splititMerchantIdentity(job: Pick<SplititAutomationJob, "storeName" | "merchantEmail">) {
+  return `${job.merchantEmail} ${job.storeName}`;
+}
+
+function splititWhitelistRequest(targetEmail: string) {
+  return `Please whitelist ${targetEmail}, I understand the risks.`;
 }
 
 export async function sendManualSplititMessage(jobId: string, actorSlackUserId: string, body: string) {

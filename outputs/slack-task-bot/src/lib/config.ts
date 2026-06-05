@@ -22,8 +22,8 @@ const schema = z.object({
   SPLITIT_AGENT_WEBHOOK_SECRET: z.string().optional().default(""),
   SPLITIT_AGENT_CSM_NAME: z.string().optional().default("Mitchell Rodio"),
   SPLITIT_AGENT_MERCHANT_ROLE: z.string().optional().default("Merchant"),
-  SPLITIT_AGENT_STORE_NAME: z.string().optional().default("Whop.com"),
-  SPLITIT_AGENT_MERCHANT_EMAIL: z.string().optional().default("mitchell.rodio@whop.com")
+  SPLITIT_AGENT_STORE_NAME: z.string().optional().default("MitchellRodio Whop.com"),
+  SPLITIT_AGENT_MERCHANT_EMAIL: z.string().optional().default("Mitchell.Rodio@Whop.com")
 });
 
 const parsed = schema.parse(process.env);

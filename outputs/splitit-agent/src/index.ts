@@ -158,7 +158,6 @@ async function answerSplititPrompts(session: Session, plan: ExecutePayload["conv
 
 function shouldWaitSilently(step: string, response: string) {
   if (step === "SENT_WHITELIST_REQUEST") return true;
-  if (step === "SENT_ESCALATION_CONFIRMATION") return true;
   return /escalate|another agent|agent who can assist|transfer/i.test(response);
 }
 
@@ -187,18 +186,6 @@ function chooseSplititResponse(prompt: string, plan: ExecutePayload["conversatio
   const wasSent = (step?: { send: string }) => Boolean(step && sentMessages.some((message) => message.includes(step.send)));
   const whitelistSent = wasSent(whitelist);
 
-  if (/(escalate|another agent|agent who can assist|assist you further|would you like me to do that)/i.test(recentPrompt)) {
-    return sentMessages.includes("Yes")
-      ? undefined
-      : { step: "SENT_ESCALATION_CONFIRMATION", waitFor: "Splitit asks to escalate to another agent", send: "Yes" };
-  }
-
-  if (/unable to process.*(whitelist|blacklist)|cannot process.*(whitelist|blacklist)/i.test(recentPrompt)) {
-    return sentMessages.includes("Yes")
-      ? undefined
-      : { step: "SENT_ESCALATION_CONFIRMATION", waitFor: "Splitit asks to escalate to another agent", send: "Yes" };
-  }
-
   if (/(merchant|shopper|customer).{0,80}(confirm|whether|are you|you're|you are)|confirm.{0,80}(merchant|shopper|customer)/i.test(recentPrompt)) {
     if (role && !wasSent(role)) return role;
   }
@@ -209,11 +196,7 @@ function chooseSplititResponse(prompt: string, plan: ExecutePayload["conversatio
 
   if ((asksStore || asksMerchantEmail) && storeAndEmail && !wasSent(storeAndEmail)) {
     if (asksName && name && !wasSent(name)) {
-      return {
-        step: "SENT_NAME_STORE_AND_EMAIL",
-        waitFor: "Splitit asks for name, store name, and merchant email",
-        send: `${name.send} ${storeAndEmail.send}`
-      };
+      return name;
     }
     return storeAndEmail;
   }
