@@ -78,29 +78,51 @@ export async function postRequesterNeedsInfo(client: WebClient, request: Request
 
 export async function notifyOwnerRequestCreated(client: WebClient, request: RequestWithChannel) {
   const company = request.channel?.companyName ?? request.channel?.name ?? request.channelId;
+  const tags = request.aiTags.length ? request.aiTags.join(", ") : "None";
+  const nextStep = request.suggestedNextStep || "Review and triage this request.";
 
   await client.chat.postMessage({
     channel: request.ownerSlackUserId,
     text: `New request assigned to you: ${request.title}`,
     blocks: [
       {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text:
-            `*New request assigned to you*\n` +
-            `*Title:* ${escapeMrkdwn(request.title)}\n` +
-            `*Channel:* <#${request.channelId}> (${company})\n` +
-            `*Requester:* <@${request.requesterSlackUserId}>\n` +
-            `*Type:* ${typeLabel(request.type)}\n` +
-            `*Status:* ${statusLabel(request)}\n` +
-            `*Intent:* ${escapeMrkdwn(request.intent || "None")}\n` +
-            `*Tags:* ${escapeMrkdwn(request.aiTags.length ? request.aiTags.join(", ") : "None")}\n` +
-            `*Next step:* ${escapeMrkdwn(request.suggestedNextStep || "Review and triage this request.")}\n` +
-            `*Due:* ${formatDate(request.dueDate)}` +
-            originalThreadLine(request)
-        }
+        type: "header",
+        text: { type: "plain_text", text: "New request assigned" }
       },
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: `*${escapeMrkdwn(request.title)}*\n${statusPill(request)} | ${typeLabel(request.type)}` }
+      },
+      {
+        type: "section",
+        fields: [
+          { type: "mrkdwn", text: `*Request ID*\n${request.id}` },
+          { type: "mrkdwn", text: `*Created*\n${formatDate(request.createdAt)}` },
+          { type: "mrkdwn", text: `*Channel*\n<#${request.channelId}>` },
+          { type: "mrkdwn", text: `*Company*\n${escapeMrkdwn(company)}` },
+          { type: "mrkdwn", text: `*Requester*\n<@${request.requesterSlackUserId}>` },
+          { type: "mrkdwn", text: `*Due*\n${formatDate(request.dueDate)}` }
+        ]
+      },
+      {
+        type: "divider"
+      },
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: `*Customer ask*\n${escapeMrkdwn(truncate(request.description || request.title, 700))}` }
+      },
+      {
+        type: "section",
+        fields: [
+          { type: "mrkdwn", text: `*Intent*\n${escapeMrkdwn(truncate(request.intent || "None", 300))}` },
+          { type: "mrkdwn", text: `*Tags*\n${escapeMrkdwn(truncate(tags, 300))}` }
+        ]
+      },
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: `*Next step*\n${escapeMrkdwn(truncate(nextStep, 700))}` }
+      },
+      ...threadBlocks(request),
       {
         type: "actions",
         elements: [
@@ -117,9 +139,23 @@ export async function notifyOwnerRequestCreated(client: WebClient, request: Requ
   });
 }
 
-function originalThreadLine(request: Request) {
-  if (request.threadTs.startsWith("manual-")) return "";
-  return `\n*Thread:* <${threadLink(request.channelId, request.threadTs)}|Open thread>`;
+function statusPill(request: Request) {
+  return `*Status:* ${escapeMrkdwn(statusLabel(request))}`;
+}
+
+function threadBlocks(request: Request) {
+  if (request.threadTs.startsWith("manual-")) return [];
+  return [
+    {
+      type: "context",
+      elements: [{ type: "mrkdwn", text: `Original thread: <${threadLink(request.channelId, request.threadTs)}|Open in Slack>` }]
+    }
+  ];
+}
+
+function truncate(value: string, maxLength: number) {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength - 3)}...`;
 }
 
 function requesterStatusBlocks(request: RequestWithChannel) {
