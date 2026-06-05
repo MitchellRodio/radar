@@ -27,7 +27,7 @@ export function requestListBlocks(requests: RequestWithRelations[], heading: str
       section(
         `*${escapeMrkdwn(request.title)}*\n` +
           `*Request ID:* ${request.id}\n` +
-          `*Company/channel:* ${escapeMrkdwn(request.channel?.companyName ?? request.channel?.name ?? request.channelId)}\n` +
+          `*Company/channel:* ${companyChannelLink(request)}\n` +
           `*Type:* ${typeLabel(request.type)}  *Status:* ${statusLabel(request)}\n` +
           `*Due:* ${formatDate(request.dueDate)}  *Blocker:* ${escapeMrkdwn(request.blocker ?? "None")}\n` +
           `*Created:* ${formatDate(request.createdAt)}`
@@ -351,7 +351,22 @@ function divider() {
 
 function threadText(request: Request) {
   if (request.threadTs.startsWith("manual-")) return "Created from /request";
-  return `<${threadLink(request.channelId, request.threadTs)}|Open thread>`;
+  return `<${threadLink(request.channelId, request.messageTs || request.threadTs)}|Open message>`;
+}
+
+function companyChannelLink(request: RequestWithRelations) {
+  const label = escapeMrkdwn(request.channel?.companyName ?? request.channel?.name ?? request.channelId);
+  const messageUrl = requestMessageUrl(request);
+  if (messageUrl) return `<${messageUrl}|${label}>`;
+  return `<#${request.channelId}>`;
+}
+
+function requestMessageUrl(request: RequestWithRelations) {
+  if (!request.threadTs.startsWith("manual-")) return threadLink(request.channelId, request.messageTs || request.threadTs);
+  if (request.requesterMessageChannelId && request.requesterMessageTs) {
+    return threadLink(request.requesterMessageChannelId, request.requesterMessageTs);
+  }
+  return "";
 }
 
 function checkoutProductOption(product: CheckoutProductOption) {
