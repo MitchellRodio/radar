@@ -30,16 +30,12 @@ export function requestListBlocks(requests: RequestWithRelations[], heading: str
           `*Company/channel:* ${escapeMrkdwn(request.channel?.companyName ?? request.channel?.name ?? request.channelId)}\n` +
           `*Type:* ${typeLabel(request.type)}  *Status:* ${statusLabel(request)}\n` +
           `*Due:* ${formatDate(request.dueDate)}  *Blocker:* ${escapeMrkdwn(request.blocker ?? "None")}\n` +
-          `*Created:* ${formatDate(request.createdAt)}`,
-        [
-          {
-            type: "button",
-            text: { type: "plain_text", text: "View/update" },
-            action_id: "request_view",
-            value: String(request.id)
-          }
-        ]
+          `*Created:* ${formatDate(request.createdAt)}`
       ),
+      actions([
+        button("View/update", "request_view", String(request.id)),
+        button("Mark done", "request_set_done", `${request.id}:DONE`, "primary")
+      ]),
       divider()
     ])
   ];
