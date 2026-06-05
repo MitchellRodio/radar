@@ -18,6 +18,7 @@ import { mapChannelOwner } from "../services/channelOwnerService";
 import { deleteChannelWhopBusiness, upsertChannelWhopBusiness } from "../services/channelWhopBusinessService";
 import {
   addInternalNote,
+  addRequesterReply,
   createRequestFromManualInput,
   extractSlackChannelId,
   extractSlackUserId,
@@ -33,10 +34,11 @@ import {
 } from "../services/requestService";
 import { ensureChannel, ensureUser } from "../services/userService";
 import { isLiveSplititJob, queueSplititAutomation, sendManualSplititMessage } from "../services/splititAutomationService";
-import { helpBlocks, inputModal, requestCreateModal, requestDetailModal, requestListBlocks } from "../slack/blocks";
+import { helpBlocks, inputModal, requesterReplyModal, requestCreateModal, requestDetailModal, requestListBlocks } from "../slack/blocks";
 import { statusLabel, typeLabel } from "../slack/format";
 import {
   notifyOwnerRequestCreated,
+  notifyOwnerRequesterReply,
   postRequesterNeedsInfo,
   postRequesterUpdate,
   sendRequesterEphemeralStatusMessage,
@@ -434,6 +436,13 @@ async function handleSlackBlockAction(payload: any, res: ServerResponse) {
     return;
   }
 
+  if (actionId === "requester_add_info_open") {
+    const request = requestId ? await getRequest(requestId) : null;
+    if (!request || request.requesterSlackUserId !== actorSlackUserId) return;
+    await slack.views.open({ trigger_id: payload.trigger_id, view: requesterReplyModal(request.id) as any });
+    return;
+  }
+
   if (!requestId || !(await canManageRequest(actorSlackUserId, requestId))) return;
 
   if (isStatusActionId(actionId)) {
@@ -591,6 +600,26 @@ async function handleSlackViewSubmission(payload: any, res: ServerResponse) {
       await postRequesterNeedsInfo(slack, request, actorSlackUserId, value.trim());
       return request;
     });
+    return;
+  }
+
+  if (callbackId.startsWith("requester_add_info:")) {
+    const requestId = parseRequestId(callbackId.split(":")[1]);
+    const value = modalValue(view, "input").trim();
+    if (!value) {
+      sendSlackJson(res, { response_action: "errors", errors: { input: "Add a short update." } });
+      return;
+    }
+
+    const request = requestId ? await getRequest(requestId) : null;
+    if (!request || request.requesterSlackUserId !== actorSlackUserId) {
+      sendText(res, 200, "");
+      return;
+    }
+
+    const updatedRequest = await addRequesterReply(request.id, actorSlackUserId, value);
+    await notifyOwnerRequesterReply(slack, updatedRequest, value);
+    sendText(res, 200, "");
     return;
   }
 

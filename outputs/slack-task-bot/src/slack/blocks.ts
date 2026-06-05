@@ -48,6 +48,13 @@ export function requestDetailBlocks(request: RequestWithRelations) {
         .map((note) => `- <@${note.authorSlackUserId}> ${formatDate(note.createdAt)}: ${escapeMrkdwn(note.body)}`)
         .join("\n")
     : "None";
+  const requesterReplies = request.updates?.filter((update) => update.actorSlackUserId === request.requesterSlackUserId && update.kind === "NOTE_ADDED") ?? [];
+  const requesterReplyText = requesterReplies.length
+    ? requesterReplies
+        .slice(0, 8)
+        .map((update) => `- ${formatDate(update.createdAt)}: ${escapeMrkdwn(update.message)}`)
+        .join("\n")
+    : "None";
 
   return [
     section(`*${escapeMrkdwn(request.title)}*`),
@@ -72,6 +79,7 @@ export function requestDetailBlocks(request: RequestWithRelations) {
     section(`*Extracted fields*\n${escapeMrkdwn(formatExtractedFields(request.extractedFields))}`),
     divider(),
     section(`*Splitit agent*\n${splititAutomationText(request)}`),
+    section(`*Requester replies*\n${requesterReplyText}`),
     section(`*Internal notes*\n${notes}`),
     actions([
       button("Set Submitted", "request_set_submitted", `${request.id}:SUBMITTED`),
@@ -225,6 +233,29 @@ export function inputModal(callbackId: string, title: string, fieldLabel: string
           multiline
         },
         label: { type: "plain_text", text: fieldLabel }
+      }
+    ]
+  };
+}
+
+export function requesterReplyModal(requestId: number) {
+  return {
+    type: "modal",
+    callback_id: `requester_add_info:${requestId}`,
+    title: { type: "plain_text", text: "Add info" },
+    submit: { type: "plain_text", text: "Send" },
+    close: { type: "plain_text", text: "Cancel" },
+    blocks: [
+      {
+        type: "input",
+        block_id: "input",
+        element: {
+          type: "plain_text_input",
+          action_id: "value",
+          multiline: true,
+          placeholder: { type: "plain_text", text: "Add details, screenshots, IDs, or anything your CSM should know." }
+        },
+        label: { type: "plain_text", text: "Update" }
       }
     ]
   };

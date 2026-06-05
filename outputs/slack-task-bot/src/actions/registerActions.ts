@@ -3,9 +3,10 @@ import { RequestStatus, RequestType } from "@prisma/client";
 import { parseDueDate } from "../lib/dates";
 import { logger } from "../lib/logger";
 import { canManageRequest } from "../lib/permissions";
-import { checkoutLinkModal, inputModal, requestDetailModal } from "../slack/blocks";
+import { checkoutLinkModal, inputModal, requesterReplyModal, requestDetailModal } from "../slack/blocks";
 import {
   notifyOwnerRequestCreated,
+  notifyOwnerRequesterReply,
   postRequesterNeedsInfo,
   postRequesterUpdate,
   sendRequesterEphemeralStatusMessage,
@@ -14,6 +15,7 @@ import {
 } from "../slack/notifications";
 import {
   addInternalNote,
+  addRequesterReply,
   createRequestFromManualInput,
   extractSlackUserId,
   getRequest,
@@ -99,6 +101,19 @@ export function registerActions(app: App) {
   app.action("request_needs_info_open", async ({ ack, body, client, action }: any) => {
     await ack();
     await openInput(client, body.trigger_id, `request_needs_info:${action.value}`, "Need info", "Message to requester", "", true);
+  });
+
+  app.action("requester_add_info_open", async ({ ack, body, client, action }: any) => {
+    await ack();
+    const requestId = parseRequestId(action.value);
+    const actorSlackUserId = body.user.id;
+    const request = requestId ? await getRequest(requestId) : null;
+    if (!request || request.requesterSlackUserId !== actorSlackUserId) return;
+
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: requesterReplyModal(request.id)
+    });
   });
 
   app.action("request_splitit_agent_queue", async ({ ack, body, client, action }: any) => {
@@ -277,6 +292,26 @@ export function registerActions(app: App) {
       await postRequesterNeedsInfo(client, request, actorSlackUserId, value.trim());
       return request;
     });
+  });
+
+  app.view(/^requester_add_info:/, async ({ ack, body, view, client }: any) => {
+    const requestId = parseRequestId(view.callback_id.split(":")[1]);
+    const actorSlackUserId = body.user.id;
+    const value = modalValue(view, "input").trim();
+    if (!value) {
+      await ack({ response_action: "errors", errors: { input: "Add a short update." } });
+      return;
+    }
+
+    const request = requestId ? await getRequest(requestId) : null;
+    if (!request || request.requesterSlackUserId !== actorSlackUserId) {
+      await ack();
+      return;
+    }
+
+    await ack();
+    const updatedRequest = await addRequesterReply(request.id, actorSlackUserId, value);
+    await notifyOwnerRequesterReply(client, updatedRequest, value);
   });
 
   app.view(/^checkout_link_create:/, async ({ ack, body, view, client }: any) => {

@@ -239,6 +239,23 @@ export async function addInternalNote(requestId: number, actorSlackUserId: strin
   });
 }
 
+export async function addRequesterReply(requestId: number, requesterSlackUserId: string, body: string) {
+  await ensureUser(requesterSlackUserId);
+  return prisma.request.update({
+    where: { id: requestId },
+    data: {
+      updates: {
+        create: {
+          actorSlackUserId: requesterSlackUserId,
+          kind: "NOTE_ADDED",
+          message: body
+        }
+      }
+    },
+    include: includeRelations
+  });
+}
+
 export async function reassignRequest(requestId: number, actorSlackUserId: string, ownerSlackUserId: string) {
   await ensureUser(ownerSlackUserId);
   return prisma.request.update({

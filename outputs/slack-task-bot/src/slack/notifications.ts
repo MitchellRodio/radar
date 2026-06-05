@@ -139,6 +139,38 @@ export async function notifyOwnerRequestCreated(client: WebClient, request: Requ
   });
 }
 
+export async function notifyOwnerRequesterReply(client: WebClient, request: RequestWithChannel, message: string) {
+  await client.chat.postMessage({
+    channel: request.ownerSlackUserId,
+    text: `This issue has a reply from the requester: ${request.title}`,
+    blocks: [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text:
+            `*This issue has a reply from the requester*\n` +
+            `*Request:* ${escapeMrkdwn(request.title)}\n` +
+            `*Requester:* <@${request.requesterSlackUserId}>\n` +
+            `*Update:*\n${escapeMrkdwn(truncate(message, 1200))}`
+        }
+      },
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: "View/update" },
+            action_id: "owner_request_view",
+            value: String(request.id),
+            style: "primary"
+          }
+        ]
+      }
+    ]
+  });
+}
+
 function statusPill(request: Request) {
   return `*Status:* ${escapeMrkdwn(statusLabel(request))}`;
 }
@@ -168,9 +200,20 @@ function requesterStatusBlocks(request: RequestWithChannel) {
           `*${escapeMrkdwn(request.title)}*\n` +
           `*Status:* ${statusLabel(request)}\n` +
           `*Type:* ${typeLabel(request.type)}\n` +
-          `*Intent:* ${escapeMrkdwn(request.intent || "None")}\n` +
-          `*Due:* ${formatDate(request.dueDate)}`
+          `*Intent:* ${escapeMrkdwn(request.intent || "None")}`
       }
+    },
+    {
+      type: "actions",
+      elements: [
+        {
+          type: "button",
+          text: { type: "plain_text", text: "Add info" },
+          action_id: "requester_add_info_open",
+          value: String(request.id),
+          style: "primary"
+        }
+      ]
     }
   ];
 }
