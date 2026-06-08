@@ -6,6 +6,16 @@ import { startSplititAutomationJob } from "./jobs/splititAutomation";
 import { startDashboardServer } from "./web/dashboard";
 import { ensureUser } from "./services/userService";
 
+process.on("uncaughtException", (error) => {
+  if (isSlackSocketModeStartupDisconnect(error)) {
+    logger.warn({ error }, "Ignoring transient Slack Socket Mode startup disconnect");
+    return;
+  }
+
+  logger.error(error, "Uncaught exception");
+  process.exit(1);
+});
+
 async function main() {
   await ensureConfiguredAdmins();
 
@@ -31,4 +41,9 @@ main().catch((error) => {
 
 async function ensureConfiguredAdmins() {
   await Promise.all(config.adminSlackUserIds.map((slackUserId) => ensureUser(slackUserId, undefined, true)));
+}
+
+function isSlackSocketModeStartupDisconnect(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  return error.message.includes("server explicit disconnect") && Boolean(error.stack?.includes("@slack/socket-mode"));
 }
