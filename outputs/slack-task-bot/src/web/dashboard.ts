@@ -19,6 +19,7 @@ import {
 import { mapChannelOwner } from "../services/channelOwnerService";
 import { deleteChannelWhopBusiness, upsertChannelWhopBusiness } from "../services/channelWhopBusinessService";
 import { customerLookupBlocks, lookupCustomerAccount } from "../services/customerLookupService";
+import { addChannelPulseNote } from "../services/pulseService";
 import {
   addInternalNote,
   addRequesterReply,
@@ -141,12 +142,17 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
   }
 
   if (req.method === "GET" && url.pathname === "/dashboard") {
-    redirect(res, `/dashboard/metrics${url.search ? url.search : ""}`);
+    redirect(res, `/dashboard/pulse${url.search ? url.search : ""}`);
     return;
   }
 
   if (req.method === "GET" && url.pathname === "/dashboard/metrics") {
     await renderMetrics(res, url.searchParams.get("notice") ?? "");
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/dashboard/pulse") {
+    await renderPulse(res, url.searchParams.get("notice") ?? "", url.searchParams.get("channel") ?? "");
     return;
   }
 
@@ -189,6 +195,18 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
       clearApiKey: body.get("clearOpenAiKey") === "on"
     });
     redirect(res, "/dashboard/settings?notice=OpenAI settings updated");
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/dashboard/pulse/note") {
+    const body = await readForm(req);
+    const channelId = body.get("channelId")?.toString().trim() ?? "";
+    const authorSlackUserId = normalizeSlackUserId(body.get("authorSlackUserId")?.toString() ?? "") || config.adminSlackUserIds[0] || "dashboard";
+    const note = body.get("note")?.toString().trim() ?? "";
+    if (channelId && note) {
+      await addChannelPulseNote({ slackChannelId: channelId, authorSlackUserId, body: note });
+    }
+    redirect(res, `/dashboard/pulse?channel=${encodeURIComponent(channelId)}&notice=Pulse note added`);
     return;
   }
 
@@ -826,6 +844,54 @@ async function renderMetrics(res: ServerResponse, notice: string) {
   );
 }
 
+async function renderPulse(res: ServerResponse, notice: string, selectedChannelId: string) {
+  const pulseChannels = await loadPulseChannels();
+  const selected = selectedChannelId
+    ? pulseChannels.find((channel) => channel.slackChannelId === selectedChannelId) ?? pulseChannels[0] ?? null
+    : pulseChannels[0] ?? null;
+  const highRisk = pulseChannels.filter((channel) => (channel.pulse?.riskScore ?? 0) >= 65).length;
+  const attentionMessages = pulseChannels.reduce((sum, channel) => sum + channel.messageInsights.filter((insight) => insight.needsAttention).length, 0);
+
+  sendHtml(
+    res,
+    200,
+    page(
+      "Radar Pulse",
+      `
+      ${nav("pulse")}
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Customer health</p>
+          <h1>Pulse</h1>
+          <p class="muted">Every customer-channel message is analyzed for blockers, dissatisfaction, churn language, and the next CSM move.</p>
+        </div>
+        <a class="button-link secondary" href="/dashboard/settings">AI settings</a>
+      </section>
+      ${notice ? `<div class="notice">${escapeHtml(notice)}</div>` : ""}
+      <section class="stat-grid splitit-stats">
+        ${statCard("Tracked channels", pulseChannels.length)}
+        ${statCard("High risk", highRisk)}
+        ${statCard("Needs attention", attentionMessages)}
+      </section>
+      <section class="pulse-layout">
+        <div class="panel pulse-sidebar">
+          <div class="panel-head">
+            <h2>Accounts</h2>
+            <span class="muted">Sorted by risk</span>
+          </div>
+          <div class="pulse-account-list">
+            ${pulseChannels.length ? pulseChannels.map((channel) => pulseAccountCard(channel, selected?.slackChannelId ?? "")).join("") : `<p class="muted">No Pulse data yet. Messages will appear here after Slack activity.</p>`}
+          </div>
+        </div>
+        <div class="pulse-detail">
+          ${selected ? pulseDetail(selected) : `<section class="panel"><p class="muted">No Pulse data yet.</p></section>`}
+        </div>
+      </section>
+      `
+    )
+  );
+}
+
 async function renderChannels(res: ServerResponse, notice: string, selectedChannelId: string) {
   const channels = await loadChannels();
   const selectedChannel = selectedChannelId
@@ -1219,10 +1285,11 @@ async function renderSplitit(res: ServerResponse, notice: string, selectedJobId:
   );
 }
 
-function nav(active: "metrics" | "channels" | "whop" | "whop-events" | "splitit" | "settings") {
+function nav(active: "metrics" | "pulse" | "channels" | "whop" | "whop-events" | "splitit" | "settings") {
   return `
     <nav class="top-nav">
       <a class="${active === "metrics" ? "active" : ""}" href="/dashboard/metrics">Metrics</a>
+      <a class="${active === "pulse" ? "active" : ""}" href="/dashboard/pulse">Pulse</a>
       <a class="${active === "channels" ? "active" : ""}" href="/dashboard/channels">Channels</a>
       <a class="${active === "whop" ? "active" : ""}" href="/dashboard/whop">Whop</a>
       <a class="${active === "whop-events" ? "active" : ""}" href="/dashboard/whop-events">Whop Events</a>
@@ -1263,6 +1330,110 @@ function recentRequests(requests: Awaited<ReturnType<typeof loadRequestStats>>["
       `).join("")}
     </div>
   `;
+}
+
+function pulseAccountCard(channel: Awaited<ReturnType<typeof loadPulseChannels>>[number], selectedChannelId: string) {
+  const pulse = channel.pulse;
+  const riskScore = pulse?.riskScore ?? 0;
+  const displayName = channel.companyName ?? channel.name ?? channel.slackChannelId;
+  const signals = pulse?.topSignals?.slice(0, 3).join(", ") || "No signals yet";
+  return `
+    <a class="pulse-account ${channel.slackChannelId === selectedChannelId ? "active" : ""}" href="/dashboard/pulse?channel=${encodeURIComponent(channel.slackChannelId)}">
+      <span class="risk-dot ${riskClass(riskScore)}"></span>
+      <span>
+        <strong>${escapeHtml(displayName)}</strong>
+        <small>${riskScore} risk | ${escapeHtml(pulse?.churnRisk ?? "LOW")} | ${escapeHtml(signals)}</small>
+      </span>
+    </a>
+  `;
+}
+
+function pulseDetail(channel: Awaited<ReturnType<typeof loadPulseChannels>>[number]) {
+  const pulse = channel.pulse;
+  const displayName = channel.companyName ?? channel.name ?? channel.slackChannelId;
+  const riskScore = pulse?.riskScore ?? 0;
+  const blockers = Array.isArray(pulse?.openBlockers) ? pulse.openBlockers as any[] : [];
+  const riskyMessages = channel.messageInsights.filter((insight) => insight.needsAttention || insight.riskScore >= 45).slice(0, 12);
+
+  return `
+    <section class="panel pulse-hero-card">
+      <div>
+        <p class="eyebrow">Account pulse</p>
+        <h2>${escapeHtml(displayName)}</h2>
+        <p class="muted"><code>${escapeHtml(channel.slackChannelId)}</code>${channel.ownerMapping?.ownerSlackUserId ? ` | Owner <code>${escapeHtml(channel.ownerMapping.ownerSlackUserId)}</code>` : ""}</p>
+      </div>
+      <div class="risk-meter ${riskClass(riskScore)}">
+        <strong>${riskScore}</strong>
+        <span>${escapeHtml(pulse?.churnRisk ?? "LOW")} risk</span>
+      </div>
+    </section>
+    <section class="grid">
+      <div class="panel">
+        <div class="panel-head"><h2>What is blocked</h2><span class="muted">${blockers.length} active signals</span></div>
+        <p>${escapeHtml(pulse?.blockerSummary ?? "No active blockers detected in recent Slack messages.")}</p>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>What feels off</h2><span class="muted">${escapeHtml(pulse?.sentiment ?? "NEUTRAL")}</span></div>
+        <p>${escapeHtml(pulse?.unhappySummary ?? "No strong dissatisfaction patterns detected yet.")}</p>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>Suggested CSM move</h2><span class="muted">${pulse?.lastAnalyzedAt ? `Updated ${formatDate(pulse.lastAnalyzedAt)}` : "Waiting for data"}</span></div>
+      <p class="action-copy">${escapeHtml(pulse?.suggestedCsmAction ?? "Monitor account sentiment and respond to blockers as they surface.")}</p>
+      <div class="signal-row">${(pulse?.topSignals ?? []).slice(0, 8).map((signal) => `<span>${escapeHtml(signal)}</span>`).join("")}</div>
+    </section>
+    <section class="grid">
+      <div class="panel">
+        <div class="panel-head"><h2>Recent risk messages</h2><span class="muted">${channel.messageInsights.length} analyzed</span></div>
+        <div class="pulse-message-list">
+          ${riskyMessages.length ? riskyMessages.map(pulseMessage).join("") : `<p class="muted">No risky messages yet.</p>`}
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>CSM notes</h2><span class="muted">Private dashboard notes</span></div>
+        <form class="stack" method="post" action="/dashboard/pulse/note">
+          <input type="hidden" name="channelId" value="${escapeHtml(channel.slackChannelId)}" />
+          <label>Note
+            <textarea name="note" rows="4" placeholder="Add context, CSM read, promised follow-up, exec risk, renewal notes..."></textarea>
+          </label>
+          <label>Author Slack user ID <span class="muted">(optional)</span>
+            <input name="authorSlackUserId" placeholder="${escapeHtml(config.adminSlackUserIds[0] ?? "dashboard")}" />
+          </label>
+          <button type="submit">Add note</button>
+        </form>
+        <div class="pulse-notes">
+          ${channel.pulseNotes.length ? channel.pulseNotes.map((note) => `
+            <div class="pulse-note">
+              <strong>${escapeHtml(note.author.name ?? note.authorSlackUserId)}</strong>
+              <p>${escapeHtml(note.body)}</p>
+              <small>${formatDate(note.createdAt)}</small>
+            </div>
+          `).join("") : `<p class="muted">No notes yet.</p>`}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function pulseMessage(insight: Awaited<ReturnType<typeof loadPulseChannels>>[number]["messageInsights"][number]) {
+  return `
+    <div class="pulse-message ${riskClass(insight.riskScore)}">
+      <div class="pulse-message-head">
+        <strong>${insight.riskScore} risk</strong>
+        <span>${escapeHtml(insight.churnRisk)} | ${escapeHtml(insight.sentiment)} | ${formatDate(insight.createdAt)}</span>
+      </div>
+      <p>${escapeHtml(insight.text)}</p>
+      ${insight.blockerSummary ? `<small><strong>Blocker:</strong> ${escapeHtml(insight.blockerSummary)}</small>` : ""}
+      ${insight.suggestedCsmAction ? `<small><strong>Move:</strong> ${escapeHtml(insight.suggestedCsmAction)}</small>` : ""}
+    </div>
+  `;
+}
+
+function riskClass(score: number) {
+  if (score >= 85) return "critical";
+  if (score >= 65) return "high";
+  if (score >= 35) return "medium";
+  return "low";
 }
 
 function whopRouteRow(route: Awaited<ReturnType<typeof loadWhopWebhookRoutes>>[number]) {
@@ -1691,6 +1862,32 @@ async function loadRequestStats() {
   };
 }
 
+async function loadPulseChannels() {
+  return prisma.channel.findMany({
+    where: {
+      OR: [
+        { pulse: { isNot: null } },
+        { messageInsights: { some: {} } }
+      ]
+    },
+    include: {
+      pulse: true,
+      ownerMapping: true,
+      whopBusinesses: { orderBy: { businessName: "asc" } },
+      messageInsights: {
+        orderBy: { createdAt: "desc" },
+        take: 50
+      },
+      pulseNotes: {
+        orderBy: { createdAt: "desc" },
+        take: 20,
+        include: { author: true }
+      }
+    },
+    orderBy: [{ companyName: "asc" }, { name: "asc" }, { slackChannelId: "asc" }]
+  }).then((channels) => channels.sort((a, b) => (b.pulse?.riskScore ?? 0) - (a.pulse?.riskScore ?? 0)));
+}
+
 async function loadSplititJobs() {
   return prisma.splititAutomationJob.findMany({
     include: {
@@ -1954,30 +2151,30 @@ function escapeHtml(value: string) {
 
 function css() {
   return `
-    :root { color-scheme: light; --bg:#f8fafd; --text:#202124; --muted:#5f6368; --line:#dadce0; --panel:#ffffff; --blue:#1a73e8; --blue-dark:#185abc; --green:#188038; --yellow:#fbbc04; --red:#d93025; }
+    :root { color-scheme: light; --bg:#f6f8fb; --text:#202124; --muted:#5f6368; --line:#dfe3e8; --panel:#ffffff; --blue:#1a73e8; --blue-dark:#185abc; --green:#188038; --yellow:#f9ab00; --red:#d93025; --orange:#fa7b17; --shadow:0 1px 2px rgba(60,64,67,.12), 0 8px 28px rgba(60,64,67,.08); }
     * { box-sizing: border-box; }
-    body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
-    main { width: min(1240px, calc(100vw - 32px)); margin: 0 auto; padding: 28px 0 56px; }
-    .hero { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding: 4px 0 22px; }
-    .top-nav { display: flex; gap: 4px; margin-bottom: 22px; border-bottom: 1px solid var(--line); }
-    .top-nav a { color: var(--muted); text-decoration: none; padding: 12px 14px; border-bottom: 3px solid transparent; font-weight: 600; border-radius: 8px 8px 0 0; }
+    body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: radial-gradient(circle at 20% -10%, #eaf2ff 0, transparent 34%), var(--bg); color: var(--text); }
+    main { width: min(1320px, calc(100vw - 32px)); margin: 0 auto; padding: 24px 0 56px; }
+    .hero { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding: 8px 0 24px; }
+    .top-nav { display: flex; gap: 6px; margin-bottom: 24px; padding: 6px; border: 1px solid var(--line); background: rgba(255,255,255,.86); backdrop-filter: blur(10px); border-radius: 14px; box-shadow: 0 1px 2px rgba(60,64,67,.08); overflow-x: auto; }
+    .top-nav a { color: var(--muted); text-decoration: none; padding: 10px 13px; font-weight: 700; border-radius: 10px; white-space: nowrap; }
     .top-nav a:hover { background: #eef4ff; color: var(--blue-dark); }
-    .top-nav a.active { color: var(--blue); border-bottom-color: var(--blue); }
+    .top-nav a.active { color: var(--blue); background: #e8f0fe; }
     .button-link { display: inline-flex; align-items: center; min-height: 38px; border-radius: 8px; padding: 8px 14px; background: var(--blue); color: white; text-decoration: none; font-weight: 700; }
     .button-link.small { min-height: 32px; padding: 6px 11px; font-size: 13px; }
     .button-link.secondary { background: #f1f3f4; color: #3c4043; }
     .hero-actions, .detail-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
     .eyebrow { color: var(--blue); font-weight: 700; margin: 0 0 8px; text-transform: uppercase; font-size: 12px; letter-spacing: 0; }
     h1, h2, h3 { margin: 0; letter-spacing: 0; }
-    h1 { font-size: 34px; line-height: 1.12; font-weight: 750; }
+    h1 { font-size: 38px; line-height: 1.08; font-weight: 760; }
     h2 { font-size: 18px; }
     h3 { font-size: 15px; margin-bottom: 10px; }
     .muted { color: var(--muted); }
     .notice { background: #e8f0fe; border: 1px solid #d2e3fc; padding: 12px 14px; border-radius: 8px; margin-bottom: 16px; color: #174ea6; }
     .notice.danger { background: #fce8e6; border-color: #fad2cf; color: var(--red); }
-    .grid { display: grid; grid-template-columns: 360px 1fr; gap: 16px; margin-bottom: 16px; }
+    .grid { display: grid; grid-template-columns: 380px 1fr; gap: 18px; margin-bottom: 18px; }
     .single-grid { grid-template-columns: 1fr; }
-    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px; box-shadow: 0 1px 2px rgba(60, 64, 67, .12); }
+    .panel { background: rgba(255,255,255,.96); border: 1px solid var(--line); border-radius: 14px; padding: 20px; box-shadow: var(--shadow); }
     .focus-panel { margin-bottom: 16px; border-color: #c2d7ff; box-shadow: 0 2px 8px rgba(26, 115, 232, .12); }
     .subtle-panel { box-shadow: none; background: #fbfdff; }
     .settings-note { display: grid; align-content: start; gap: 12px; }
@@ -1987,9 +2184,9 @@ function css() {
     .check-row { display: flex; grid-template-columns: none; align-items: center; gap: 8px; }
     .check-row input { width: auto; min-height: auto; }
     label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
-    input, select, textarea { width: 100%; min-height: 38px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: #fff; color: var(--text); font: inherit; outline-color: var(--blue); }
+    input, select, textarea { width: 100%; min-height: 40px; border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; background: #fff; color: var(--text); font: inherit; outline-color: var(--blue); }
     textarea { resize: vertical; line-height: 1.45; }
-    button { min-height: 38px; border: 0; border-radius: 8px; padding: 8px 14px; background: var(--blue); color: white; font-weight: 700; cursor: pointer; box-shadow: 0 1px 1px rgba(60, 64, 67, .18); }
+    button { min-height: 40px; border: 0; border-radius: 10px; padding: 8px 14px; background: var(--blue); color: white; font-weight: 700; cursor: pointer; box-shadow: 0 1px 1px rgba(60, 64, 67, .18); }
     button:hover { background: var(--blue-dark); }
     button.secondary-button { background: #f1f3f4; color: #3c4043; }
     button.secondary-button:hover { background: #e8eaed; }
@@ -2009,6 +2206,39 @@ function css() {
     .recent-item { display: grid; gap: 4px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
     .recent-item:last-child { border-bottom: 0; padding-bottom: 0; }
     .recent-item span { color: var(--muted); font-size: 13px; }
+    .pulse-layout { display: grid; grid-template-columns: 380px minmax(0, 1fr); gap: 18px; align-items: start; }
+    .pulse-sidebar { position: sticky; top: 16px; }
+    .pulse-account-list, .pulse-message-list, .pulse-notes { display: grid; gap: 10px; }
+    .pulse-account { display: grid; grid-template-columns: 12px 1fr; gap: 12px; align-items: center; padding: 13px; border: 1px solid var(--line); border-radius: 12px; background: #fff; color: var(--text); text-decoration: none; }
+    .pulse-account:hover, .pulse-account.active { border-color: #c2d7ff; background: #f8fbff; }
+    .pulse-account small { display: block; margin-top: 4px; color: var(--muted); line-height: 1.35; }
+    .risk-dot { width: 10px; height: 10px; border-radius: 999px; box-shadow: 0 0 0 4px rgba(95,99,104,.12); }
+    .risk-dot.low, .risk-meter.low { background: #e6f4ea; color: var(--green); }
+    .risk-dot.medium, .risk-meter.medium { background: #fef7e0; color: #b06000; }
+    .risk-dot.high, .risk-meter.high { background: #feefc3; color: var(--orange); }
+    .risk-dot.critical, .risk-meter.critical { background: #fce8e6; color: var(--red); }
+    .risk-dot.low { background: var(--green); }
+    .risk-dot.medium { background: var(--yellow); }
+    .risk-dot.high { background: var(--orange); }
+    .risk-dot.critical { background: var(--red); }
+    .pulse-hero-card { display: flex; justify-content: space-between; align-items: center; gap: 18px; margin-bottom: 18px; }
+    .risk-meter { min-width: 132px; padding: 16px; border-radius: 14px; display: grid; justify-items: center; gap: 3px; }
+    .risk-meter strong { font-size: 38px; line-height: 1; }
+    .risk-meter span { font-size: 12px; font-weight: 800; text-transform: uppercase; }
+    .action-copy { font-size: 18px; line-height: 1.45; margin: 0; }
+    .signal-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    .signal-row span { border-radius: 999px; padding: 5px 10px; background: #eef4ff; color: #174ea6; font-size: 12px; font-weight: 700; }
+    .pulse-message { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-left: 4px solid var(--green); border-radius: 12px; background: #fff; }
+    .pulse-message.medium { border-left-color: var(--yellow); }
+    .pulse-message.high { border-left-color: var(--orange); }
+    .pulse-message.critical { border-left-color: var(--red); }
+    .pulse-message p { margin: 0; line-height: 1.45; }
+    .pulse-message small { color: var(--muted); line-height: 1.4; }
+    .pulse-message-head { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
+    .pulse-message-head strong { color: var(--text); }
+    .pulse-note { padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: #fbfdff; }
+    .pulse-note p { margin: 6px 0; line-height: 1.45; }
+    .pulse-note small { color: var(--muted); }
     .splitit-layout { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 16px; align-items: start; }
     .splitit-stats { grid-template-columns: repeat(3, 1fr); }
     .splitit-chat-list { display: grid; gap: 8px; }
@@ -2059,6 +2289,6 @@ function css() {
     .login-panel { max-width: 440px; margin: 15vh auto 0; }
     .login { display: grid; gap: 14px; margin-top: 18px; }
     @media (max-width: 1000px) { .stat-grid { grid-template-columns: repeat(3, 1fr); } }
-    @media (max-width: 820px) { main { width: min(100vw - 24px, 1180px); padding-top: 20px; } .hero, .panel-head { align-items: stretch; flex-direction: column; } .grid, .splitit-layout { grid-template-columns: 1fr; } .stat-row, .stat-grid, .splitit-meta, .business-inline { grid-template-columns: 1fr; min-width: 0; } }
+    @media (max-width: 820px) { main { width: min(100vw - 24px, 1180px); padding-top: 20px; } .hero, .panel-head, .pulse-hero-card { align-items: stretch; flex-direction: column; } .grid, .splitit-layout, .pulse-layout { grid-template-columns: 1fr; } .pulse-sidebar { position: static; } .stat-row, .stat-grid, .splitit-meta, .business-inline { grid-template-columns: 1fr; min-width: 0; } }
   `;
 }

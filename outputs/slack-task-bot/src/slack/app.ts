@@ -3,6 +3,7 @@ import { config } from "../lib/config";
 import { logger } from "../lib/logger";
 import { registerActions } from "../actions/registerActions";
 import { registerCommands } from "../commands/registerCommands";
+import { processSlackMessageForPulse } from "../services/pulseService";
 import { createRequestFromSlackMessage, updateRequesterMessageReference } from "../services/requestService";
 import { notifyOwnerRequestCreated, sendRequesterEphemeralStatusMessage, sendRequesterStatusMessage } from "./notifications";
 
@@ -39,6 +40,24 @@ export function createSlackApp() {
         thread_ts: event.thread_ts ?? event.ts,
         text: "Sorry, I could not create that request. Please try again or use `/request-help`."
       });
+    }
+  });
+
+  app.message(async ({ message, context }: any) => {
+    try {
+      if (!message?.text || !message.channel || !message.ts) return;
+      if (message.subtype || message.bot_id || message.user === context.botUserId) return;
+      if (context.botUserId && message.text.includes(`<@${context.botUserId}>`)) return;
+
+      void processSlackMessageForPulse({
+        slackChannelId: message.channel,
+        slackUserId: message.user,
+        messageTs: message.ts,
+        threadTs: message.thread_ts ?? null,
+        text: message.text
+      }).catch((error) => logger.error({ error, channel: message.channel, ts: message.ts }, "Pulse message analysis failed"));
+    } catch (error) {
+      logger.error(error, "Failed to queue Pulse message analysis");
     }
   });
 

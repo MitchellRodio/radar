@@ -86,6 +86,7 @@ model User {
   requestUpdates   RequestUpdate[]
   channelMappings  ChannelOwnerMapping[]
   channelMemberships ChannelMember[]
+  pulseNotes       ChannelPulseNote[]
 }
 
 model Channel {
@@ -101,6 +102,9 @@ model Channel {
   members ChannelMember[]
   whopBusinesses ChannelWhopBusiness[]
   whopWebhookRoutes WhopWebhookRoute[]
+  pulse ChannelPulse?
+  messageInsights SlackMessageInsight[]
+  pulseNotes ChannelPulseNote[]
 }
 
 model ChannelMember {
@@ -179,6 +183,67 @@ model WhopWebhookDelivery {
 
   @@index([eventType, createdAt])
   @@index([businessId])
+}
+
+model SlackMessageInsight {
+  id                    String   @id @default(cuid())
+  slackChannelId        String
+  slackUserId           String?
+  messageTs             String
+  threadTs              String?
+  text                  String
+  businessIds           String[] @default([])
+  riskScore             Int      @default(0)
+  churnRisk             String   @default("LOW")
+  sentiment             String   @default("NEUTRAL")
+  blockerType           String?
+  blockerSummary        String   @default("")
+  dissatisfactionSignals String[] @default([])
+  aiTags                String[] @default([])
+  suggestedCsmAction    String   @default("")
+  confidence            Float    @default(0)
+  needsAttention        Boolean  @default(false)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  channel Channel @relation(fields: [slackChannelId], references: [slackChannelId], onDelete: Cascade)
+
+  @@unique([slackChannelId, messageTs])
+  @@index([slackChannelId, createdAt])
+  @@index([riskScore])
+  @@index([needsAttention])
+}
+
+model ChannelPulse {
+  id                    String   @id @default(cuid())
+  slackChannelId        String   @unique
+  riskScore             Int      @default(0)
+  churnRisk             String   @default("LOW")
+  sentiment             String   @default("NEUTRAL")
+  blockerSummary        String   @default("")
+  unhappySummary        String   @default("")
+  suggestedCsmAction    String   @default("")
+  openBlockers          Json     @default("[]")
+  topSignals            String[] @default([])
+  lastMessageAt         DateTime?
+  lastAnalyzedAt        DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  channel Channel @relation(fields: [slackChannelId], references: [slackChannelId], onDelete: Cascade)
+}
+
+model ChannelPulseNote {
+  id                    String   @id @default(cuid())
+  slackChannelId        String
+  authorSlackUserId     String
+  body                  String
+  createdAt             DateTime @default(now())
+
+  channel Channel @relation(fields: [slackChannelId], references: [slackChannelId], onDelete: Cascade)
+  author  User    @relation(fields: [authorSlackUserId], references: [slackUserId])
+
+  @@index([slackChannelId, createdAt])
 }
 
 model Request {
