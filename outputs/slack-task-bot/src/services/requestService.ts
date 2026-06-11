@@ -11,8 +11,18 @@ const includeRelations = {
   owner: true,
   channel: true,
   splititAutomationJob: true,
+  attachments: { orderBy: { createdAt: "asc" as const } },
   notes: { orderBy: { createdAt: "desc" as const } },
   updates: { orderBy: { createdAt: "desc" as const }, take: 10 }
+};
+
+export type RequestAttachmentInput = {
+  slackFileId: string;
+  name?: string | null;
+  mimetype?: string | null;
+  filetype?: string | null;
+  urlPrivate?: string | null;
+  permalink?: string | null;
 };
 
 export async function createRequestFromSlackMessage(input: {
@@ -22,6 +32,7 @@ export async function createRequestFromSlackMessage(input: {
   messageTs: string;
   threadTs?: string;
   botUserId?: string;
+  attachments?: RequestAttachmentInput[];
 }) {
   const parsed = parseRequestText(input.text, input.botUserId);
   const forcedType = await isKycOnlyChannel(input.channelId) ? "KYC_KYB" : null;
@@ -36,6 +47,7 @@ export async function createRequestFromSlackMessage(input: {
 
   const ownerSlackUserId = (await getChannelOwner(input.channelId)) ?? input.requesterSlackUserId;
   await ensureUser(ownerSlackUserId);
+  const attachments = attachmentCreate(input.attachments);
 
   return prisma.request.create({
     data: {
@@ -53,6 +65,7 @@ export async function createRequestFromSlackMessage(input: {
       channelId: input.channelId,
       messageTs: input.messageTs,
       threadTs: input.threadTs ?? input.messageTs,
+      ...(attachments ? { attachments } : {}),
       updates: {
         create: {
           actorSlackUserId: input.requesterSlackUserId,
@@ -73,6 +86,7 @@ export async function createRequestFromManualInput(input: {
   channelId: string;
   dueDate?: Date | null;
   blocker?: string | null;
+  attachments?: RequestAttachmentInput[];
 }) {
   await ensureUser(input.requesterSlackUserId);
   await ensureChannel(input.channelId);
@@ -88,6 +102,7 @@ export async function createRequestFromManualInput(input: {
     dueDate: input.dueDate ?? null
   });
   const placeholderTs = `manual-${Date.now()}`;
+  const attachments = attachmentCreate(input.attachments);
   return prisma.request.create({
     data: {
       title: input.title,
@@ -105,6 +120,7 @@ export async function createRequestFromManualInput(input: {
       channelId: input.channelId,
       messageTs: placeholderTs,
       threadTs: placeholderTs,
+      ...(attachments ? { attachments } : {}),
       updates: {
         create: {
           actorSlackUserId: input.requesterSlackUserId,
@@ -114,6 +130,33 @@ export async function createRequestFromManualInput(input: {
       }
     },
     include: includeRelations
+  });
+}
+
+function attachmentCreate(attachments: RequestAttachmentInput[] | undefined) {
+  const cleaned = uniqueAttachments(attachments);
+  return cleaned.length
+    ? {
+        create: cleaned.map((attachment) => ({
+          slackFileId: attachment.slackFileId,
+          name: attachment.name?.trim() || null,
+          mimetype: attachment.mimetype?.trim() || null,
+          filetype: attachment.filetype?.trim() || null,
+          urlPrivate: attachment.urlPrivate?.trim() || null,
+          permalink: attachment.permalink?.trim() || null
+        }))
+      }
+    : undefined;
+}
+
+function uniqueAttachments(attachments: RequestAttachmentInput[] | undefined) {
+  const seen = new Set<string>();
+  return (attachments ?? []).filter((attachment) => {
+    const slackFileId = attachment.slackFileId?.trim();
+    if (!slackFileId || seen.has(slackFileId)) return false;
+    seen.add(slackFileId);
+    attachment.slackFileId = slackFileId;
+    return true;
   });
 }
 

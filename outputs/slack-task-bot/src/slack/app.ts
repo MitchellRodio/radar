@@ -5,6 +5,7 @@ import { registerActions } from "../actions/registerActions";
 import { registerCommands } from "../commands/registerCommands";
 import { processSlackMessageForPulse } from "../services/pulseService";
 import { createRequestFromSlackMessage, updateRequesterMessageReference } from "../services/requestService";
+import { enrichSlackFileAttachments, extractMessageFileAttachments } from "../services/slackFileService";
 import { notifyOwnerRequestCreated, sendRequesterEphemeralStatusMessage, sendRequesterStatusMessage } from "./notifications";
 
 export function createSlackApp() {
@@ -23,7 +24,8 @@ export function createSlackApp() {
         channelId: event.channel,
         messageTs: event.ts,
         threadTs: event.thread_ts ?? event.ts,
-        botUserId: context.botUserId
+        botUserId: context.botUserId,
+        attachments: await enrichSlackFileAttachments(client, extractMessageFileAttachments(event.files))
       });
 
       const requesterMessage = await sendRequesterStatusMessage(client, request);

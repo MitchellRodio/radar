@@ -21,6 +21,7 @@ import { isKycOnlyChannel, setChannelBotMode } from "../services/channelModeServ
 import { deleteChannelWhopBusiness, upsertChannelWhopBusiness } from "../services/channelWhopBusinessService";
 import { customerLookupBlocks, lookupCustomerAccount } from "../services/customerLookupService";
 import { addChannelPulseNote } from "../services/pulseService";
+import { enrichSlackFileAttachments, extractModalFileAttachments } from "../services/slackFileService";
 import {
   addInternalNote,
   addRequesterReply,
@@ -662,6 +663,7 @@ async function handleSlackViewSubmission(payload: any, res: ServerResponse) {
     const channelId = metadata.channelId;
     if (!channelId) throw new Error("Missing channel ID in request_create metadata");
     const kycOnly = await isKycOnlyChannel(channelId);
+    const attachments = await enrichSlackFileAttachments(slack, extractModalFileAttachments(view, "screenshots"));
 
     const request = await createRequestFromManualInput({
       title,
@@ -670,7 +672,8 @@ async function handleSlackViewSubmission(payload: any, res: ServerResponse) {
       requesterSlackUserId: actorSlackUserId,
       channelId,
       dueDate: null,
-      blocker: null
+      blocker: null,
+      attachments
     });
 
     const result = await sendRequesterStatusMessage(slack, request);

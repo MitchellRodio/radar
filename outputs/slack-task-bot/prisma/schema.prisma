@@ -283,11 +283,29 @@ model Request {
   channel   Channel @relation(fields: [channelId], references: [slackChannelId])
   notes     InternalNote[]
   updates   RequestUpdate[]
+  attachments RequestAttachment[]
   splititAutomationJob SplititAutomationJob?
 
   @@index([ownerSlackUserId, status])
   @@index([channelId])
   @@index([dueDate])
+}
+
+model RequestAttachment {
+  id           String   @id @default(cuid())
+  requestId    Int
+  slackFileId  String
+  name         String?
+  mimetype     String?
+  filetype     String?
+  urlPrivate   String?
+  permalink    String?
+  createdAt    DateTime @default(now())
+
+  request Request @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@unique([requestId, slackFileId])
+  @@index([slackFileId])
 }
 
 model SplititAutomationJob {

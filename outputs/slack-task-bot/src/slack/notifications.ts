@@ -1,11 +1,12 @@
 import { WebClient } from "@slack/web-api";
-import { Channel, Request } from "@prisma/client";
+import { Channel, Request, RequestAttachment } from "@prisma/client";
 import { formatDate } from "../lib/dates";
 import { statusLabel, threadLink, typeLabel } from "./format";
 import { recordRequesterNotification } from "../services/requestService";
 
 type RequestWithChannel = Request & {
   channel?: Channel | null;
+  attachments?: RequestAttachment[];
 };
 
 export async function postRequesterUpdate(client: WebClient, request: Request, actorSlackUserId: string, prefix = "Update") {
@@ -122,6 +123,7 @@ export async function notifyOwnerRequestCreated(client: WebClient, request: Requ
         type: "section",
         text: { type: "mrkdwn", text: `*Next step*\n${escapeMrkdwn(truncate(nextStep, 700))}` }
       },
+      ...attachmentBlocks(request),
       ...threadBlocks(request),
       {
         type: "actions",
@@ -137,6 +139,25 @@ export async function notifyOwnerRequestCreated(client: WebClient, request: Requ
       }
     ]
   });
+}
+
+function attachmentBlocks(request: RequestWithChannel) {
+  const attachments = request.attachments ?? [];
+  if (!attachments.length) return [];
+  const text = attachments
+    .slice(0, 5)
+    .map((attachment) => {
+      const label = escapeMrkdwn(attachment.name ?? attachment.filetype ?? attachment.slackFileId);
+      const url = attachment.permalink ?? attachment.urlPrivate;
+      return url ? `- <${url}|${label}>` : `- \`${escapeMrkdwn(attachment.slackFileId)}\` ${label}`;
+    })
+    .join("\n");
+  return [
+    {
+      type: "section",
+      text: { type: "mrkdwn", text: `*Screenshots / uploads*\n${text}` }
+    }
+  ];
 }
 
 export async function notifyOwnerRequesterReply(client: WebClient, request: RequestWithChannel, message: string) {

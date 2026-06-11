@@ -31,6 +31,7 @@ import { queueSplititAutomation } from "../services/splititAutomationService";
 import { createCheckoutLink, listCheckoutProductOptionsForRequest } from "../services/checkoutLinkService";
 import { lookupPaymentsForChannel, paymentLookupBlocks } from "../services/paymentLookupService";
 import { isKycOnlyChannel } from "../services/channelModeService";
+import { enrichSlackFileAttachments, extractModalFileAttachments } from "../services/slackFileService";
 
 export function registerActions(app: App) {
   app.action("request_view", async ({ ack, body, client, action }: any) => {
@@ -188,6 +189,7 @@ export function registerActions(app: App) {
 
     try {
       if (!channelId) throw new Error("Missing channel ID in request_create metadata");
+      const attachments = await enrichSlackFileAttachments(client, extractModalFileAttachments(view, "screenshots"));
 
       if (selectedType === "VIEW_PAYMENTS" && !kycOnly) {
         const email = extractEmail(`${customerEmail} ${title} ${description}`);
@@ -204,7 +206,8 @@ export function registerActions(app: App) {
         requesterSlackUserId: body.user.id,
         channelId,
         dueDate: null,
-        blocker: null
+        blocker: null,
+        attachments
       });
 
       const result = await sendRequesterStatusMessage(client, request);

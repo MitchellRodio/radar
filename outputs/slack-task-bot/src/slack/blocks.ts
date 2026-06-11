@@ -1,4 +1,4 @@
-import { InternalNote, Request, RequestType, RequestUpdate, User, Channel, SplititAutomationJob } from "@prisma/client";
+import { InternalNote, Request, RequestAttachment, RequestType, RequestUpdate, User, Channel, SplititAutomationJob } from "@prisma/client";
 import { formatDate } from "../lib/dates";
 import type { CheckoutProductOption } from "../services/checkoutLinkService";
 import { statusLabel, threadLink, typeLabel } from "./format";
@@ -9,6 +9,7 @@ type RequestWithRelations = Request & {
   channel?: Channel;
   notes?: InternalNote[];
   updates?: RequestUpdate[];
+  attachments?: RequestAttachment[];
   splititAutomationJob?: SplititAutomationJob | null;
 };
 
@@ -55,6 +56,7 @@ export function requestDetailBlocks(request: RequestWithRelations) {
         .map((update) => `- ${formatDate(update.createdAt)}: ${escapeMrkdwn(update.message)}`)
         .join("\n")
     : "None";
+  const attachmentsText = formatAttachments(request.attachments ?? []);
 
   return [
     section(`*${escapeMrkdwn(request.title)}*`),
@@ -77,6 +79,7 @@ export function requestDetailBlocks(request: RequestWithRelations) {
         `*Updated:* ${formatDate(request.updatedAt)}`
     ),
     section(`*Extracted fields*\n${escapeMrkdwn(formatExtractedFields(request.extractedFields))}`),
+    section(`*Screenshots / uploads*\n${attachmentsText}`),
     divider(),
     section(`*Splitit agent*\n${splititAutomationText(request)}`),
     section(`*Requester replies*\n${requesterReplyText}`),
@@ -128,6 +131,18 @@ function splititAutomationText(request: RequestWithRelations) {
     `*Last response:* ${escapeMrkdwn(job.lastResponse ?? "None")}\n` +
     `*Error:* ${escapeMrkdwn(job.error ?? "None")}`
   );
+}
+
+function formatAttachments(attachments: RequestAttachment[]) {
+  if (!attachments.length) return "None";
+  return attachments
+    .slice(0, 8)
+    .map((attachment) => {
+      const label = escapeMrkdwn(attachment.name ?? attachment.filetype ?? attachment.slackFileId);
+      const url = attachment.permalink ?? attachment.urlPrivate;
+      return url ? `- <${url}|${label}>` : `- \`${escapeMrkdwn(attachment.slackFileId)}\` ${label}`;
+    })
+    .join("\n");
 }
 
 export function requestDetailModal(request: RequestWithRelations) {
@@ -328,6 +343,18 @@ export function requestCreateModal(input: { channelId: string; initialDescriptio
           options: requestTypeOptions
         },
         label: { type: "plain_text", text: "Request type" }
+      },
+      {
+        type: "input",
+        block_id: "screenshots",
+        optional: true,
+        element: {
+          type: "file_input",
+          action_id: "value",
+          filetypes: ["jpg", "jpeg", "png", "gif", "webp", "pdf"],
+          max_files: 5
+        },
+        label: { type: "plain_text", text: "Screenshots" }
       }
     ]
   };
