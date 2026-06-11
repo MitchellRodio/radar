@@ -294,7 +294,7 @@ export function requestCreateModal(input: { channelId: string; initialDescriptio
     type: "modal",
     callback_id: "request_create",
     private_metadata: JSON.stringify({ channelId: input.channelId }),
-    title: { type: "plain_text", text: "New request" },
+    title: { type: "plain_text", text: input.kycOnly ? "KYC issue" : "New request" },
     submit: { type: "plain_text", text: "Create" },
     close: { type: "plain_text", text: "Cancel" },
     blocks: [
@@ -305,7 +305,7 @@ export function requestCreateModal(input: { channelId: string; initialDescriptio
         element: {
           type: "plain_text_input",
           action_id: "value",
-          placeholder: { type: "plain_text", text: "Checkout link for Splitit" }
+          placeholder: { type: "plain_text", text: input.kycOnly ? "KYC Issue" : "Checkout link for Splitit" }
         },
         label: { type: "plain_text", text: "Title" }
       },

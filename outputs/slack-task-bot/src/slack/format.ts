@@ -8,7 +8,7 @@ export function typeLabel(type: RequestType): string {
     REFUND_PAYMENT: "Refund payment",
     BUG_REPORT: "Bug report",
     ENHANCEMENT_REQUEST: "Enhancement request",
-    KYC_KYB: "KYC/KYB",
+    KYC_KYB: "KYC",
     PAYMENT_ISSUE: "Payment issue",
     ACCOUNT_SETTINGS: "Account settings",
     OTHER: "Other"
