@@ -68,6 +68,7 @@ type DashboardChannel = {
   companyName: string | null;
   botMode: ChannelBotMode;
   ownerSlackUserId: string | null;
+  availableCsms: DashboardUser[];
   members: DashboardChannelMember[];
   whopBusinesses: DashboardChannelWhopBusiness[];
   openRequests: number;
@@ -336,6 +337,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
         where: { slackChannelId_slackUserId: { slackChannelId: channelId, slackUserId: ownerSlackUserId } },
         update: { role: "CSM" },
         create: { slackChannelId: channelId, slackUserId: ownerSlackUserId, role: "CSM" }
+      });
+      await prisma.request.updateMany({
+        where: { channelId, status: { not: "DONE" } },
+        data: { ownerSlackUserId }
       });
     }
     redirect(res, `/dashboard/channels?channel=${encodeURIComponent(channelId)}&notice=Channel owner updated`);
@@ -1624,14 +1629,15 @@ function channelMemberPanel(channel: DashboardChannel) {
           <h3>Owner CSM</h3>
           <form class="stack" method="post" action="/dashboard/channel-owner">
             <input type="hidden" name="channelId" value="${escapeHtml(channel.slackChannelId)}" />
-            <label>Select from this channel
+            <label>Select CSM
               <select name="ownerSlackUserId" required>
                 <option value="">Select CSM</option>
-                ${channel.members.map((member) => `<option value="${escapeHtml(member.slackUserId)}" ${member.slackUserId === channel.ownerSlackUserId ? "selected" : ""}>${escapeHtml(userLabel(member))}</option>`).join("")}
+                ${ownerOptions(channel).map((user) => `<option value="${escapeHtml(user.slackUserId)}" ${user.slackUserId === channel.ownerSlackUserId ? "selected" : ""}>${escapeHtml(userLabel(user))}</option>`).join("")}
               </select>
             </label>
             <button type="submit">Save owner</button>
           </form>
+          ${ownerOptions(channel).length ? "" : `<p class="muted">No CSMs found yet. Add a CSM role in a channel member list or configure an admin user.</p>`}
         </div>
         <div class="panel subtle-panel">
           <h3>Role model</h3>
@@ -1710,6 +1716,24 @@ function channelMemberRow(channelId: string, member: DashboardChannelMember) {
 
 function userLabel(user: DashboardUser) {
   return user.name ? `${user.name} (${user.slackUserId})` : user.slackUserId;
+}
+
+function ownerOptions(channel: DashboardChannel) {
+  const users = new Map<string, DashboardUser>();
+  channel.availableCsms.forEach((user) => users.set(user.slackUserId, user));
+  channel.members
+    .filter(isChannelOperator)
+    .forEach((member) => users.set(member.slackUserId, member));
+  const owner = channel.members.find((member) => member.slackUserId === channel.ownerSlackUserId);
+  if (owner) users.set(owner.slackUserId, owner);
+  if (channel.ownerSlackUserId && !users.has(channel.ownerSlackUserId)) {
+    users.set(channel.ownerSlackUserId, {
+      slackUserId: channel.ownerSlackUserId,
+      name: null,
+      role: "CSM"
+    });
+  }
+  return Array.from(users.values()).sort((a, b) => userLabel(a).localeCompare(userLabel(b)));
 }
 
 function memberPreview(members: DashboardChannelMember[]) {
@@ -1835,19 +1859,57 @@ function roleLabel(role: UserRole) {
 }
 
 async function loadChannels(): Promise<DashboardChannel[]> {
-  const channels = await prisma.channel.findMany({
-    include: {
-      ownerMapping: true,
-      members: {
-        include: { user: true },
-        orderBy: { slackUserId: "asc" }
+  const [channels, csmUsers] = await Promise.all([
+    prisma.channel.findMany({
+      include: {
+        ownerMapping: true,
+        members: {
+          include: { user: true },
+          orderBy: { slackUserId: "asc" }
+        },
+        whopBusinesses: {
+          orderBy: [{ businessName: "asc" }, { businessId: "asc" }]
+        }
       },
-      whopBusinesses: {
-        orderBy: [{ businessName: "asc" }, { businessId: "asc" }]
+      orderBy: [{ companyName: "asc" }, { name: "asc" }, { slackChannelId: "asc" }]
+    }),
+    prisma.user.findMany({
+      where: {
+        OR: [
+          { role: { in: ["ADMIN", "CSM"] } },
+          { isAdmin: true },
+          { slackUserId: { in: config.adminSlackUserIds } }
+        ]
+      },
+      orderBy: [{ name: "asc" }, { slackUserId: "asc" }]
+    })
+  ]);
+  const availableCsms = csmUsers.map((user) => ({
+    slackUserId: user.slackUserId,
+    name: user.name,
+    role: user.role
+  }));
+
+  for (const adminSlackUserId of config.adminSlackUserIds) {
+    if (!availableCsms.some((user) => user.slackUserId === adminSlackUserId)) {
+      availableCsms.push({
+        slackUserId: adminSlackUserId,
+        name: null,
+        role: "ADMIN"
+      });
+    }
+  }
+
+  for (const user of availableCsms) {
+    if (!user.name) {
+      const existing = await prisma.user.findUnique({ where: { slackUserId: user.slackUserId }, select: { name: true } });
+      const name = existing?.name ?? await fetchSlackUserName(user.slackUserId);
+      if (name) {
+        user.name = name;
+        await ensureUser(user.slackUserId, name, user.role === "ADMIN", user.role);
       }
-    },
-    orderBy: [{ companyName: "asc" }, { name: "asc" }, { slackChannelId: "asc" }]
-  });
+    }
+  }
 
   return Promise.all(
     channels.map(async (channel) => {
@@ -1862,6 +1924,7 @@ async function loadChannels(): Promise<DashboardChannel[]> {
         companyName: channel.companyName,
         botMode: channel.botMode,
         ownerSlackUserId: channel.ownerMapping?.ownerSlackUserId ?? null,
+        availableCsms,
         members: channel.members.map((member) => ({
           slackUserId: member.user.slackUserId,
           name: member.user.name,
