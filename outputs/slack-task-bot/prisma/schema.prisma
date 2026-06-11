@@ -44,6 +44,11 @@ enum UserRole {
   REQUESTER
 }
 
+enum ChannelBotMode {
+  FULL
+  KYC_ONLY
+}
+
 enum SplititAutomationStatus {
   QUEUED
   RUNNING
@@ -94,6 +99,7 @@ model Channel {
   slackChannelId String   @unique
   name           String?
   companyName    String?
+  botMode        ChannelBotMode @default(FULL)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 

@@ -1,7 +1,7 @@
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { createHmac, timingSafeEqual } from "crypto";
 import { WebClient } from "@slack/web-api";
-import type { RequestStatus, RequestType, UserRole } from "@prisma/client";
+import type { ChannelBotMode, RequestStatus, RequestType, UserRole } from "@prisma/client";
 import { config } from "../lib/config";
 import { formatDate, parseDueDate } from "../lib/dates";
 import { logger } from "../lib/logger";
@@ -17,6 +17,7 @@ import {
   saveWhopWebhookSettings
 } from "../services/appSettingsService";
 import { mapChannelOwner } from "../services/channelOwnerService";
+import { isKycOnlyChannel, setChannelBotMode } from "../services/channelModeService";
 import { deleteChannelWhopBusiness, upsertChannelWhopBusiness } from "../services/channelWhopBusinessService";
 import { customerLookupBlocks, lookupCustomerAccount } from "../services/customerLookupService";
 import { addChannelPulseNote } from "../services/pulseService";
@@ -64,6 +65,7 @@ type DashboardChannel = {
   slackChannelId: string;
   name: string | null;
   companyName: string | null;
+  botMode: ChannelBotMode;
   ownerSlackUserId: string | null;
   members: DashboardChannelMember[];
   whopBusinesses: DashboardChannelWhopBusiness[];
@@ -311,6 +313,17 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/dashboard/channel-bot-mode") {
+    const body = await readForm(req);
+    const channelId = (body.get("channelId") ?? "").trim();
+    const botMode = normalizeChannelBotMode(body.get("botMode") ?? "");
+    if (channelId && botMode) {
+      await setChannelBotMode(channelId, botMode);
+    }
+    redirect(res, `/dashboard/channels?channel=${encodeURIComponent(channelId)}&notice=Channel bot mode updated`);
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/dashboard/channel-owner") {
     const body = await readForm(req);
     const channelId = (body.get("channelId") ?? "").trim();
@@ -392,15 +405,24 @@ async function handleSlackHttpRequest(req: IncomingMessage, res: ServerResponse)
   try {
     switch (command) {
       case "/request": {
+        const kycOnly = await isKycOnlyChannel(channelId);
         await slack.views.open({
           trigger_id: body.get("trigger_id") ?? "",
-          view: requestCreateModal({ channelId, initialDescription: text }) as any
+          view: requestCreateModal({ channelId, initialDescription: text, kycOnly }) as any
         });
         sendText(res, 200, "");
         return;
       }
 
       case "/customer-lookup": {
+        if (await isKycOnlyChannel(channelId)) {
+          sendSlackJson(res, {
+            response_type: "ephemeral",
+            text: "This channel is in KYC-only mode. Use `/request` to create or update KYC issues."
+          });
+          return;
+        }
+
         const email = extractEmail(text);
         if (!email) {
           sendSlackJson(res, { response_type: "ephemeral", text: "Usage: `/customer-lookup customer@example.com`" });
@@ -639,11 +661,12 @@ async function handleSlackViewSubmission(payload: any, res: ServerResponse) {
     const metadata = JSON.parse(view.private_metadata || "{}");
     const channelId = metadata.channelId;
     if (!channelId) throw new Error("Missing channel ID in request_create metadata");
+    const kycOnly = await isKycOnlyChannel(channelId);
 
     const request = await createRequestFromManualInput({
       title,
       description,
-      type: type || "OTHER",
+      type: kycOnly ? "KYC_KYB" : type || "OTHER",
       requesterSlackUserId: actorSlackUserId,
       channelId,
       dueDate: null,
@@ -952,6 +975,7 @@ async function renderChannels(res: ServerResponse, notice: string, selectedChann
               <tr>
                 <th>Channel</th>
                 <th>Slack ID</th>
+                <th>Mode</th>
                 <th>Owner</th>
                 <th>Members</th>
                 <th>Whop biz</th>
@@ -1570,6 +1594,7 @@ function channelRow(channel: DashboardChannel) {
     <tr>
       <td><strong>${escapeHtml(displayName)}</strong></td>
       <td><code>${escapeHtml(channel.slackChannelId)}</code></td>
+      <td><span class="pill ${channel.botMode === "KYC_ONLY" ? "warning" : "ok"}">${channelModeLabel(channel.botMode)}</span></td>
       <td>${owner ? `${escapeHtml(userLabel(owner))}<br /><span class="role-chip">${roleLabel(owner.channelRole)}</span>` : channel.ownerSlackUserId ? `<code>${escapeHtml(channel.ownerSlackUserId)}</code>` : `<span class="muted">Unassigned</span>`}</td>
       <td>${memberPreview(channel.members)}</td>
       <td>${whopBusinessPreview(channel.whopBusinesses)}</td>
@@ -1608,6 +1633,18 @@ function channelMemberPanel(channel: DashboardChannel) {
         <div class="panel subtle-panel">
           <h3>Role model</h3>
           <p class="muted">Roles here apply only inside this channel. Use CSM/admin for people who should manage requests. Sales reps and requesters cannot update tickets.</p>
+        </div>
+        <div class="panel subtle-panel">
+          <h3>Bot mode</h3>
+          <p class="muted">Full mode enables every workflow. KYC-only mode turns this channel into a dedicated KYC/KYB issue intake and hides general request flows.</p>
+          <form class="stack" method="post" action="/dashboard/channel-bot-mode">
+            <input type="hidden" name="channelId" value="${escapeHtml(channel.slackChannelId)}" />
+            <input type="hidden" name="botMode" value="${channel.botMode === "KYC_ONLY" ? "FULL" : "KYC_ONLY"}" />
+            <button type="submit" class="${channel.botMode === "KYC_ONLY" ? "secondary-button" : ""}">
+              ${channel.botMode === "KYC_ONLY" ? "Switch to full functionality" : "Enable KYC only"}
+            </button>
+          </form>
+          <p><span class="pill ${channel.botMode === "KYC_ONLY" ? "warning" : "ok"}">${channelModeLabel(channel.botMode)}</span></p>
         </div>
       </div>
       <div class="grid">
@@ -1782,6 +1819,14 @@ function roleSelect(name: string, selected: UserRole) {
   return `<select name="${name}" required>${roles.map((role) => `<option value="${role}" ${role === selected ? "selected" : ""}>${roleLabel(role)}</option>`).join("")}</select>`;
 }
 
+function normalizeChannelBotMode(value: unknown): ChannelBotMode | null {
+  return value === "FULL" || value === "KYC_ONLY" ? value : null;
+}
+
+function channelModeLabel(mode: ChannelBotMode) {
+  return mode === "KYC_ONLY" ? "KYC only" : "Full";
+}
+
 function roleLabel(role: UserRole) {
   return role.toLowerCase().replace(/_/g, " ");
 }
@@ -1812,6 +1857,7 @@ async function loadChannels(): Promise<DashboardChannel[]> {
         slackChannelId: channel.slackChannelId,
         name: channel.name,
         companyName: channel.companyName,
+        botMode: channel.botMode,
         ownerSlackUserId: channel.ownerMapping?.ownerSlackUserId ?? null,
         members: channel.members.map((member) => ({
           slackUserId: member.user.slackUserId,
@@ -2285,6 +2331,7 @@ function css() {
     code { background: #f1f3f4; border-radius: 6px; padding: 2px 6px; font-size: 12px; color: #3c4043; }
     .pill, .role-chip { display: inline-flex; align-items: center; border-radius: 999px; padding: 3px 9px; background: #f1f3f4; color: #3c4043; font-size: 12px; font-weight: 700; text-transform: capitalize; }
     .pill.ok { background: #e6f4ea; color: var(--green); }
+    .pill.warning { background: #fef7e0; color: #b06000; }
     .role-chip { background: #e8f0fe; color: #174ea6; }
     .login-panel { max-width: 440px; margin: 15vh auto 0; }
     .login { display: grid; gap: 14px; margin-top: 18px; }

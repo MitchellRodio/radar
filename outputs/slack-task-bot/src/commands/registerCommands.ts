@@ -11,6 +11,7 @@ import {
   reassignRequest
 } from "../services/requestService";
 import { mapChannelOwner } from "../services/channelOwnerService";
+import { isKycOnlyChannel } from "../services/channelModeService";
 import { customerLookupBlocks, lookupCustomerAccount } from "../services/customerLookupService";
 
 export function registerCommands(app: App) {
@@ -49,11 +50,13 @@ export function registerCommands(app: App) {
   app.command("/request", async ({ ack, command, respond, client }: any) => {
     await ack();
     try {
+      const kycOnly = await isKycOnlyChannel(command.channel_id);
       await client.views.open({
         trigger_id: command.trigger_id,
         view: requestCreateModal({
           channelId: command.channel_id,
-          initialDescription: command.text?.trim()
+          initialDescription: command.text?.trim(),
+          kycOnly
         })
       });
     } catch (error) {
@@ -74,6 +77,13 @@ export function registerCommands(app: App) {
     }
 
     try {
+      if (await isKycOnlyChannel(command.channel_id)) {
+        await respond({
+          response_type: "ephemeral",
+          text: "This channel is in KYC-only mode. Use `/request` to create or update KYC issues."
+        });
+        return;
+      }
       const lookup = await lookupCustomerAccount({ channelId: command.channel_id, email });
       await respond({
         response_type: "ephemeral",

@@ -30,6 +30,7 @@ import {
 import { queueSplititAutomation } from "../services/splititAutomationService";
 import { createCheckoutLink, listCheckoutProductOptionsForRequest } from "../services/checkoutLinkService";
 import { lookupPaymentsForChannel, paymentLookupBlocks } from "../services/paymentLookupService";
+import { isKycOnlyChannel } from "../services/channelModeService";
 
 export function registerActions(app: App) {
   app.action("request_view", async ({ ack, body, client, action }: any) => {
@@ -166,9 +167,12 @@ export function registerActions(app: App) {
     const customerEmail = modalValue(view, "customerEmail").trim();
     const selectedType = modalSelectedValue(view, "type");
     const type = selectedType as RequestType;
+    const metadata = JSON.parse(view.private_metadata || "{}");
+    const channelId = metadata.channelId;
+    const kycOnly = channelId ? await isKycOnlyChannel(channelId) : false;
 
     const errors: Record<string, string> = {};
-    if (selectedType !== "VIEW_PAYMENTS") {
+    if (selectedType !== "VIEW_PAYMENTS" || kycOnly) {
       if (!title) errors.title = "Add a short title.";
       if (!description) errors.description = "Add request details.";
     } else if (!extractEmail(`${customerEmail} ${title} ${description}`)) {
@@ -183,11 +187,9 @@ export function registerActions(app: App) {
     await ack();
 
     try {
-      const metadata = JSON.parse(view.private_metadata || "{}");
-      const channelId = metadata.channelId;
       if (!channelId) throw new Error("Missing channel ID in request_create metadata");
 
-      if (selectedType === "VIEW_PAYMENTS") {
+      if (selectedType === "VIEW_PAYMENTS" && !kycOnly) {
         const email = extractEmail(`${customerEmail} ${title} ${description}`);
         if (!email) return;
         const lookup = await lookupPaymentsForChannel({ channelId, email });
@@ -198,7 +200,7 @@ export function registerActions(app: App) {
       const request = await createRequestFromManualInput({
         title,
         description,
-        type: type || "OTHER",
+        type: kycOnly ? "KYC_KYB" : type || "OTHER",
         requesterSlackUserId: body.user.id,
         channelId,
         dueDate: null,

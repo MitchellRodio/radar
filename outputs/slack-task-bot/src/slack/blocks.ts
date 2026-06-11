@@ -261,7 +261,20 @@ export function requesterReplyModal(requestId: number) {
   };
 }
 
-export function requestCreateModal(input: { channelId: string; initialDescription?: string }) {
+export function requestCreateModal(input: { channelId: string; initialDescription?: string; kycOnly?: boolean }) {
+  const requestTypeOptions = input.kycOnly
+    ? [requestTypeOption("KYC_KYB")]
+    : [
+        requestTypeOption("CHECKOUT_LINK"),
+        requestTypeOption("SPLITIT_WHITELIST"),
+        requestTypeOption("BUG_REPORT"),
+        requestTypeOption("ENHANCEMENT_REQUEST"),
+        requestTypeOption("KYC_KYB"),
+        requestTypeOption("PAYMENT_ISSUE"),
+        requestTypeOption("ACCOUNT_SETTINGS"),
+        requestTypeOption("OTHER"),
+        selfServeOption("VIEW_PAYMENTS", "View payments")
+      ];
   return {
     type: "modal",
     callback_id: "request_create",
@@ -311,18 +324,8 @@ export function requestCreateModal(input: { channelId: string; initialDescriptio
         element: {
           type: "static_select",
           action_id: "value",
-          initial_option: requestTypeOption("OTHER"),
-          options: [
-            requestTypeOption("CHECKOUT_LINK"),
-            requestTypeOption("SPLITIT_WHITELIST"),
-            requestTypeOption("BUG_REPORT"),
-            requestTypeOption("ENHANCEMENT_REQUEST"),
-            requestTypeOption("KYC_KYB"),
-            requestTypeOption("PAYMENT_ISSUE"),
-            requestTypeOption("ACCOUNT_SETTINGS"),
-            requestTypeOption("OTHER"),
-            selfServeOption("VIEW_PAYMENTS", "View payments")
-          ]
+          initial_option: input.kycOnly ? requestTypeOption("KYC_KYB") : requestTypeOption("OTHER"),
+          options: requestTypeOptions
         },
         label: { type: "plain_text", text: "Request type" }
       }

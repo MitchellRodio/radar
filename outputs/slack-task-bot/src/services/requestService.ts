@@ -2,6 +2,7 @@ import { RequestStatus, RequestType } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { analyzeRequestWithAi } from "./aiRequestAnalyzer";
 import { getChannelOwner } from "./channelOwnerService";
+import { isKycOnlyChannel } from "./channelModeService";
 import { parseRequestText } from "./requestParser";
 import { ensureChannel, ensureUser } from "./userService";
 
@@ -23,10 +24,11 @@ export async function createRequestFromSlackMessage(input: {
   botUserId?: string;
 }) {
   const parsed = parseRequestText(input.text, input.botUserId);
+  const forcedType = await isKycOnlyChannel(input.channelId) ? "KYC_KYB" : null;
   const aiMetadata = await analyzeRequestWithAi({
     title: parsed.title,
     description: parsed.description,
-    fallbackType: parsed.type,
+    fallbackType: forcedType ?? parsed.type,
     dueDate: parsed.dueDate
   });
   await ensureUser(input.requesterSlackUserId);
@@ -39,7 +41,7 @@ export async function createRequestFromSlackMessage(input: {
     data: {
       title: parsed.title,
       description: parsed.description,
-      type: aiMetadata.type,
+      type: forcedType ?? aiMetadata.type,
       aiTags: aiMetadata.aiTags,
       intent: aiMetadata.intent,
       extractedFields: aiMetadata.extractedFields,
@@ -74,6 +76,7 @@ export async function createRequestFromManualInput(input: {
 }) {
   await ensureUser(input.requesterSlackUserId);
   await ensureChannel(input.channelId);
+  const forcedType = await isKycOnlyChannel(input.channelId) ? "KYC_KYB" : null;
 
   const ownerSlackUserId = (await getChannelOwner(input.channelId)) ?? input.requesterSlackUserId;
   await ensureUser(ownerSlackUserId);
@@ -81,7 +84,7 @@ export async function createRequestFromManualInput(input: {
   const aiMetadata = await analyzeRequestWithAi({
     title: input.title,
     description: input.description,
-    fallbackType: input.type,
+    fallbackType: forcedType ?? input.type,
     dueDate: input.dueDate ?? null
   });
   const placeholderTs = `manual-${Date.now()}`;
@@ -89,7 +92,7 @@ export async function createRequestFromManualInput(input: {
     data: {
       title: input.title,
       description: input.description,
-      type: aiMetadata.type,
+      type: forcedType ?? aiMetadata.type,
       aiTags: aiMetadata.aiTags,
       intent: aiMetadata.intent,
       extractedFields: aiMetadata.extractedFields,
